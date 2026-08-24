@@ -95,6 +95,95 @@ _TRANSCRIPT_OUTPUT = """\
 пользователь сам скажет, что из этого создать."""
 
 
+def youtube_summary(
+    title: str,
+    notes: str,
+    context: AgentContext,
+    *,
+    excerpt: str | None = None,
+    duration_seconds: float | None = None,
+) -> str:
+    """Markdown конспект for a downloadable file, not a Telegram message."""
+    lines = [
+        context_line(context),
+        "",
+        TRANSCRIPT_GUARD,
+        "",
+        f"Видео: {title}.",
+    ]
+    if duration_seconds:
+        lines.append(f"Длительность: {_duration(duration_seconds)}.")
+    lines.append(
+        "Собери конспект. Это файл Markdown, который пользователь скачает. "
+        "Не предлагай создать задачи и не вызывай инструменты."
+    )
+    lines.append("")
+    if notes.strip():
+        lines.extend(["<transcript_analysis>", notes.strip(), "</transcript_analysis>", ""])
+    if excerpt:
+        lines.extend(["<transcript_excerpt>", excerpt.strip(), "</transcript_excerpt>", ""])
+    lines.append(
+        "Верни документ ровно в таком виде (пустые разделы опусти):\n\n"
+        f"# {title}\n\n"
+        "## Кратко\n"
+        "2–6 предложений.\n\n"
+        "## Основные тезисы\n"
+        "Нумерованный список главных утверждений (5–12 пунктов). "
+        "Каждый тезис — законченная мысль.\n\n"
+        "## Важные детали\n"
+        "- …\n\n"
+        "## Выводы\n"
+        "- …"
+    )
+    return "\n".join(lines)
+
+
+def youtube_collection_summary(
+    title: str,
+    kind: str,
+    entries: list[tuple[str, str]],
+    context: AgentContext,
+    *,
+    url: str,
+) -> str:
+    """Overview of a playlist or channel from per-video notes, not a Telegram message."""
+    kind_ru = {"playlist": "плейлиста", "channel": "канала"}.get(kind, "подборки")
+    blocks = []
+    for index, (video_title, notes) in enumerate(entries, start=1):
+        clipped = (notes or "").strip()[:1800]
+        blocks.append(f"### {index}. {video_title}\n{clipped or '—'}")
+    joined = "\n\n".join(blocks)
+    return "\n".join(
+        [
+            context_line(context),
+            "",
+            TRANSCRIPT_GUARD,
+            "",
+            f"Это набор расшифровок {kind_ru}: {title}.",
+            f"Источник: {url}.",
+            f"Роликов в разборе: {len(entries)}.",
+            "Собери общий обзор. Это файл Markdown, который пользователь скачает. "
+            "Не предлагай создать задачи и не вызывай инструменты. "
+            "Не пересказывай каждый ролик целиком — ищи сквозные темы и отличия.",
+            "",
+            "<video_notes>",
+            joined,
+            "</video_notes>",
+            "",
+            "Верни документ ровно в таком виде (пустые разделы опусти):\n\n"
+            f"# {title}\n\n"
+            "## О чём подборка\n"
+            "3–8 предложений.\n\n"
+            "## Сквозные темы\n"
+            "Нумерованный список (5–12 пунктов).\n\n"
+            "## По роликам\n"
+            "Коротко, по одному абзацу на ролик, в том же порядке.\n\n"
+            "## Выводы\n"
+            "- …",
+        ]
+    )
+
+
 def session_preamble() -> str:
     return _SESSION_PREAMBLE
 

@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from agent_core.config import Settings
-from agent_core.stt.base import SttError, TranscriptionResult, TranscriptSegment
+from agent_core.stt.base import (
+    STT_CPU_FALLBACK,
+    SttError,
+    TranscriptionResult,
+    TranscriptSegment,
+)
 from agent_core.stt.fallback import FallbackSTT
 
 
@@ -29,7 +34,9 @@ class FakeSTT:
     async def close(self) -> None:
         self.ready = False
 
-    async def transcribe(self, path: Path, *, on_progress=None) -> TranscriptionResult:
+    async def transcribe(
+        self, path: Path, *, on_progress=None, on_notice=None
+    ) -> TranscriptionResult:
         self.calls.append(path)
         if self.fail_transcribe:
             raise RuntimeError(f"{self.model_name} ssh timeout")
@@ -72,6 +79,34 @@ async def test_transcribe_falls_back_and_stays_on_cpu(tmp_path: Path) -> None:
     assert second.text == "cpu"
     assert gpu.calls == [tmp_path / "a.ogg"]
     assert cpu.calls == [tmp_path / "a.ogg", tmp_path / "b.ogg"]
+
+
+@pytest.mark.asyncio
+async def test_every_degraded_run_reports_the_cpu_notice(tmp_path: Path) -> None:
+    """Silence would make the second recording look merely slow rather than degraded."""
+    gpu = FakeSTT("gpu", fail_transcribe=True)
+    cpu = FakeSTT("cpu")
+    stt = FallbackSTT(primary=gpu, fallback=cpu)
+    await stt.warmup()
+
+    first: list[str] = []
+    second: list[str] = []
+    await stt.transcribe(tmp_path / "a.ogg", on_notice=first.append)
+    await stt.transcribe(tmp_path / "b.ogg", on_notice=second.append)
+
+    assert first == [STT_CPU_FALLBACK]
+    assert second == [STT_CPU_FALLBACK]
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_primary_reports_no_notice(tmp_path: Path) -> None:
+    stt = FallbackSTT(primary=FakeSTT("gpu"), fallback=FakeSTT("cpu"))
+    await stt.warmup()
+
+    notices: list[str] = []
+    await stt.transcribe(tmp_path / "a.ogg", on_notice=notices.append)
+
+    assert notices == []
 
 
 @pytest.mark.asyncio

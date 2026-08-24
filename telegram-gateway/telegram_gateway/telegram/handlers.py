@@ -19,6 +19,7 @@ from pa_protocol import RpcError, methods, new_ulid
 
 from ..storage.models import GatewayStore
 from .formatting import confirmation_expired_notice, describe_error
+from .keyboard import BUTTON_COMMANDS, HIDE, hide_keyboard, main_keyboard
 
 log = logging.getLogger(__name__)
 
@@ -33,10 +34,19 @@ HELP_TEXT = """Персональный ассистент.
 /transcribe — ответом на голосовое: только расшифровка, без обработки
 /reminders — список напоминаний
 /tasks — список задач
+/keyboard — показать кнопки
 /help — эта справка
 
+Кнопки внизу экрана делают то же самое. «Скрыть кнопки» убирает их.
+
 Длинную запись встречи можно прислать файлом: я расшифрую её и разберу
-на решения, задачи и сроки. Ничего не выполню без подтверждения."""
+на решения, задачи и сроки.
+
+Ссылку на YouTube:
+• видео, плейлист или канал — кнопками «Конспект» или «Скачать видео»;
+• «конспект» — расшифровка, тезисы и (для плейлиста/канала) общий обзор;
+• «скачай» — выкачка видео на диск.
+Ничего не выполню без подтверждения."""
 
 # Telegram gives voice notes no filename; a sensible default keeps ffmpeg's format sniffing happy.
 _DEFAULT_AUDIO_NAME = "voice.ogg"
@@ -88,13 +98,19 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
     async def on_start(message: Message) -> None:
         if not authorized(message.from_user.id):
             return
-        await message.answer(HELP_TEXT)
+        await message.answer(HELP_TEXT, reply_markup=main_keyboard())
 
     @router.message(Command("help"))
     async def on_help(message: Message) -> None:
         if not authorized(message.from_user.id):
             return
-        await message.answer(HELP_TEXT)
+        await message.answer(HELP_TEXT, reply_markup=main_keyboard())
+
+    @router.message(Command("keyboard"))
+    async def on_keyboard(message: Message) -> None:
+        if not authorized(message.from_user.id):
+            return
+        await message.answer("Кнопки на месте.", reply_markup=main_keyboard())
 
     @router.message(Command("new"))
     async def on_new(message: Message) -> None:
@@ -170,6 +186,34 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
             )
             return
         await _accept_audio(target, purpose="transcribe_only", trigger=message)
+
+    _COMMANDS = {
+        "new": on_new,
+        "cancel": on_cancel,
+        "reminders": on_reminders,
+        "tasks": on_tasks,
+        "status": on_status,
+        "help": on_help,
+    }
+
+    # ---- reply-keyboard labels ---------------------------------------
+    # Telegram delivers these as ordinary text, not as slash commands.
+
+    @router.message(F.text == HIDE)
+    async def on_hide_keyboard(message: Message) -> None:
+        if not authorized(message.from_user.id):
+            return
+        await message.answer(
+            "Кнопки скрыты. /keyboard вернёт их.",
+            reply_markup=hide_keyboard(),
+        )
+
+    @router.message(F.text.in_(set(BUTTON_COMMANDS)))
+    async def on_menu_button(message: Message) -> None:
+        if not authorized(message.from_user.id):
+            return
+        name = BUTTON_COMMANDS[message.text]
+        await _COMMANDS[name](message)
 
     # ---- content -----------------------------------------------------
 

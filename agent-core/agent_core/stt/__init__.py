@@ -1,5 +1,21 @@
 """Speech-to-text abstraction and backends."""
 
-from .base import SpeechToText, SttError, TranscriptionResult, TranscriptSegment
+from .base import (
+    STT_CPU_FALLBACK,
+    NoticeHook,
+    ProgressHook,
+    SpeechToText,
+    SttError,
+    TranscriptionResult,
+    TranscriptSegment,
+)
 
-__all__ = ["SpeechToText", "SttError", "TranscriptSegment", "TranscriptionResult"]
+__all__ = [
+    "STT_CPU_FALLBACK",
+    "NoticeHook",
+    "ProgressHook",
+    "SpeechToText",
+    "SttError",
+    "TranscriptSegment",
+    "TranscriptionResult",
+]

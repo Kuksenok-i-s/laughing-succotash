@@ -27,7 +27,7 @@ agent_core/
 │   ├── transcript.py  chunking and hierarchical extraction
 │   └── confirmations.py
 ├── mcp/               the loopback HTTP MCP server, tools, permission tiers
-├── stt/               faster-whisper behind a protocol
+├── stt/               local faster-whisper or the GPU service, behind one protocol
 ├── audio/             streamed uploads, ffprobe
 ├── search/            the external-search contract (no provider configured)
 ├── jobs/              per-conversation serial execution

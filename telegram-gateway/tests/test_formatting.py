@@ -71,6 +71,14 @@ def test_error_codes_become_human_text() -> None:
 
 def test_stage_text_describes_the_current_work() -> None:
     assert describe_stage("transcribing") == "Расшифровываю запись…"
+    assert "CPU" in describe_stage("transcribing_cpu")
     assert describe_stage("summarizing").startswith("Расшифровка готова")
     assert describe_stage("executing_tool", "calendar_create").endswith("(calendar_create)")
     assert describe_stage("unknown_stage") == "Обрабатываю…"
+
+
+def test_the_share_done_is_shown_so_a_long_job_looks_alive() -> None:
+    assert describe_stage("transcribing", progress=0.232).endswith("(23%)")
+    assert describe_stage("transcribing", "Касперская", 0.5).endswith("(50% · Касперская)")
+    # Whisper reports a fraction per segment, and the last one can overshoot slightly.
+    assert describe_stage("transcribing", progress=1.04).endswith("(100%)")

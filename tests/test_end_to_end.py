@@ -56,6 +56,7 @@ class FakeBot:
         self.edits: list[tuple[int, int, str]] = []
         self.deleted: list[tuple[int, int]] = []
         self.actions: list[tuple[int, str]] = []
+        self.documents: list[tuple[str, bytes, str | None]] = []
         self._next_id = 1000
 
     async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None, **kwargs):
@@ -72,6 +73,15 @@ class FakeBot:
 
     async def send_chat_action(self, chat_id, action) -> None:
         self.actions.append((chat_id, action))
+
+    async def send_document(self, chat_id, document, caption=None, **kwargs):
+        filename = getattr(document, "filename", "file")
+        data = getattr(document, "data", b"")
+        self._next_id += 1
+        message = SentMessage(chat_id, caption or filename, self._next_id, None)
+        self.sent.append(message)
+        self.documents.append((filename, data, caption))
+        return message
 
 
 class FakeBackend:
@@ -142,7 +152,9 @@ class FakeSTT:
             segments=segments or [TranscriptSegment(0.0, 5.0, text)],
         )
 
-    async def transcribe(self, audio_path: Path, *, on_progress=None) -> TranscriptionResult:
+    async def transcribe(
+        self, audio_path: Path, *, on_progress=None, on_notice=None
+    ) -> TranscriptionResult:
         # Asserted here rather than in a test: the Core must hand whisper a real, complete file.
         assert audio_path.exists(), "core handed whisper a path that does not exist"
         self.calls.append(audio_path)

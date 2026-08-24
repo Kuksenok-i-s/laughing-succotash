@@ -26,13 +26,15 @@ ERROR_TEXT = {
     "agent_failed": "Cursor Agent не смог обработать запрос.",
     "stt_unavailable": "Распознавание речи сейчас недоступно.",
     "stt_failed": "Не удалось распознать запись.",
+    "youtube_download_failed": "Не удалось скачать видео с YouTube.",
     "interrupted": "Обработка прервалась из-за перезапуска ядра.",
 }
 
 STAGE_TEXT = {
     "queued": "В очереди…",
-    "downloading": "Загружаю файл…",
+    "downloading": "Скачиваю…",
     "transcribing": "Расшифровываю запись…",
+    "transcribing_cpu": "GPU недоступен — расшифровываю на CPU, это дольше…",
     "summarizing": "Расшифровка готова. Анализирую…",
     "agent": "Думаю…",
     "executing_tool": "Выполняю действие…",
@@ -45,9 +47,19 @@ def describe_error(code: str, fallback: str = "Что-то пошло не та�
     return ERROR_TEXT.get(code, fallback)
 
 
-def describe_stage(stage: str, detail: str | None = None) -> str:
+def describe_stage(stage: str, detail: str | None = None, progress: float | None = None) -> str:
+    """Status line for one job.
+
+    The share done goes first and before the detail: on an hour-long recording the stage text alone
+    never changes, and a status message that never changes reads as a dead pipeline.
+    """
     text = STAGE_TEXT.get(stage, "Обрабатываю…")
-    return f"{text} ({detail})" if detail else text
+    parts = []
+    if progress is not None:
+        parts.append(f"{min(max(round(progress * 100), 0), 100)}%")
+    if detail:
+        parts.append(detail)
+    return f"{text} ({' · '.join(parts)})" if parts else text
 
 
 def escape_markdown_v2(text: str) -> str:

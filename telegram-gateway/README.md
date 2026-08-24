@@ -26,6 +26,7 @@ telegram_gateway/
 ├── config.py          settings; two secrets and some limits
 ├── telegram/
 │   ├── handlers.py    inbound updates → durable queue
+│   ├── keyboard.py    reply keyboard and bot command menu
 │   ├── renderer.py    Core intent → Bot API calls, with deduplication
 │   └── formatting.py  message splitting, Markdown escaping, error wording
 ├── rpc/

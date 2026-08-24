@@ -25,16 +25,27 @@ class FakeMcp:
 class FakeStt:
     """Returns a scripted transcription; records that the file was handed over."""
 
-    def __init__(self, text: str = "привет", segments=None, duration: float = 12.0) -> None:
+    def __init__(
+        self,
+        text: str = "привет",
+        segments=None,
+        duration: float = 12.0,
+        notice: str | None = None,
+    ) -> None:
         self.text = text
         self.segments = segments
         self.duration = duration
+        self.notice = notice
         self.calls: list[Path] = []
         self.ready = True
         self.model_name = "fake"
 
-    async def transcribe(self, path: Path, *, on_progress=None) -> TranscriptionResult:
+    async def transcribe(
+        self, path: Path, *, on_progress=None, on_notice=None
+    ) -> TranscriptionResult:
         self.calls.append(path)
+        if self.notice is not None and on_notice is not None:
+            on_notice(self.notice)
         if on_progress is not None:
             on_progress(0.5)
         segments = self.segments or [TranscriptSegment(0.0, self.duration, self.text)]
@@ -66,7 +77,7 @@ def contexts() -> ContextRegistry:
 def build(settings, repos, gateway, backend, contexts, tmp_path):
     """Factory so a test can swap in its own STT or agent behaviour."""
 
-    def _build(*, stt=None, agent=None):
+    def _build(*, stt=None, agent=None, youtube=None, confirmations=None):
         chosen = agent or backend
         sessions = SessionManager(
             repos.conversations,
@@ -90,6 +101,8 @@ def build(settings, repos, gateway, backend, contexts, tmp_path):
                 workspace=tmp_path / "workspace",
                 chunk_chars=settings.transcript_chunk_chars,
             ),
+            youtube=youtube,
+            confirmations=confirmations,
         )
         return service, jobs
 
@@ -368,6 +381,238 @@ async def test_status_reports_the_moving_parts(build) -> None:
     assert status["cursor"]["backend"] == "fake"
     assert set(status["jobs"]) == {"queued", "running"}
     assert "instance_id" in status["core"]
+
+
+class FakeConfirmations:
+    def __init__(self, choice: str = "transcribe") -> None:
+        self.choice = choice
+        self.calls: list[dict] = []
+
+    async def request_choice(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.choice
+
+
+class FakeYoutube:
+    def __init__(self, title: str = "Me at the zoo", tmp_path: Path | None = None) -> None:
+        self.title = title
+        self.calls: list[str] = []
+        self.video_calls: list[tuple[str, str]] = []
+        root = tmp_path or Path("/tmp/yt-test")
+        self.transcripts_dir = root / "transcripts"
+        self.videos_dir = root / "videos"
+
+    async def fetch(self, url, dest_dir, *, job_id):
+        batch = await self.fetch_audio(url, dest_dir, job_id=job_id, kind="video")
+        return batch.items[0]
+
+    async def fetch_audio(self, url, dest_dir, *, job_id, kind="video"):
+        from agent_core.youtube.download import YoutubeAudioBatch, YoutubeMedia
+
+        self.calls.append(url)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        count = 1 if kind == "video" else 2
+        items = []
+        for index in range(count):
+            audio = dest_dir / f"audio{index}.mp3"
+            audio.write_bytes(b"fake-audio")
+            title = self.title if count == 1 else f"{self.title} {index + 1}"
+            items.append(
+                YoutubeMedia(
+                    url=url,
+                    video_id=f"id{index}",
+                    title=title,
+                    duration=19.0,
+                    audio_path=audio,
+                    index=index + 1,
+                )
+            )
+        return YoutubeAudioBatch(dest=dest_dir, items=items, title=self.title, kind=kind)
+
+    async def fetch_video(self, url, dest_dir, *, job_id, kind="video"):
+        from agent_core.youtube.download import YoutubeLibrary
+
+        self.video_calls.append((url, kind))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        video = dest_dir / "clip.mp4"
+        video.write_bytes(b"fake-video")
+        return YoutubeLibrary(dest=dest_dir, files=[video], title=self.title, kind=kind)
+
+
+async def test_a_youtube_url_sends_two_named_documents(build, gateway, backend, tmp_path) -> None:
+    youtube = FakeYoutube(title="Касперская: кибербезопасность", tmp_path=tmp_path)
+    stt = FakeStt(text="лекция про кибербезопасность и угрозы")
+    backend.reply = (
+        "# Касперская: кибербезопасность\n\n"
+        "Источник: https://www.youtube.com/watch?v=jNQXAC9IVRw\n\n"
+        "## Кратко\nКраткий обзор угроз.\n\n"
+        "## Основные тезисы\n1. Угрозы растут.\n"
+    )
+    service, jobs = build(stt=stt, youtube=youtube)
+
+    await service.submit(
+        submit_params("https://youtu.be/jNQXAC9IVRw")
+    )
+    assert await jobs.wait_idle()
+
+    assert youtube.calls == ["https://www.youtube.com/watch?v=jNQXAC9IVRw"]
+    assert stt.calls
+    texts = gateway.texts()
+    assert any("Касперская: кибербезопасность" in text for text in texts)
+
+    documents = [
+        params
+        for method, params in gateway.delivered
+        if method == "telegram.send_document"
+    ]
+    assert len(documents) == 2
+    names = [doc["filename"] for doc in documents]
+    assert names == [
+        "Касперская - кибербезопасность — конспект.md",
+        "Касперская - кибербезопасность — транскрипт.md",
+    ]
+    assert "Основные тезисы" in documents[0]["content"]
+    assert "# Касперская: кибербезопасность" in documents[1]["content"]
+    assert "лекция про кибербезопасность" in documents[1]["content"]
+    saved = list((tmp_path / "transcripts").rglob("*.md"))
+    assert len(saved) == 2
+    assert any("Сохранил:" in text for text in texts)
+
+
+async def test_a_cpu_fallback_is_visible_while_waiting_and_afterwards(
+    build, gateway, tmp_path
+) -> None:
+    from agent_core.stt.base import STT_CPU_FALLBACK
+
+    youtube = FakeYoutube(title="Me at the zoo", tmp_path=tmp_path)
+    stt = FakeStt(text="hello zoo", notice=STT_CPU_FALLBACK)
+    service, jobs = build(stt=stt, youtube=youtube)
+
+    await service.submit(submit_params("конспект https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+
+    stages = [
+        params["stage"]
+        for method, params in gateway.notifications
+        if method == "job.progress"
+    ]
+    assert "transcribing_cpu" in stages
+    assert any("на CPU" in text for text in gateway.texts())
+
+
+async def test_a_healthy_gpu_run_says_nothing_about_cpu(build, gateway, tmp_path) -> None:
+    youtube = FakeYoutube(title="Me at the zoo", tmp_path=tmp_path)
+    service, jobs = build(stt=FakeStt(text="hello zoo"), youtube=youtube)
+
+    await service.submit(submit_params("конспект https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+
+    stages = [
+        params["stage"]
+        for method, params in gateway.notifications
+        if method == "job.progress"
+    ]
+    assert "transcribing" in stages
+    assert "transcribing_cpu" not in stages
+    assert not any("CPU" in text for text in gateway.texts())
+
+
+async def test_a_download_phrase_archives_the_video(build, gateway, tmp_path) -> None:
+    youtube = FakeYoutube(title="Me at the zoo", tmp_path=tmp_path)
+    service, jobs = build(youtube=youtube)
+    await service.submit(submit_params("скачай https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+    assert youtube.calls == []
+    assert youtube.video_calls == [("https://www.youtube.com/watch?v=jNQXAC9IVRw", "video")]
+    assert [
+        method for method, _ in gateway.delivered if method == "telegram.send_document"
+    ] == []
+    assert any("Сохранил на диск" in text for text in gateway.texts())
+
+
+async def test_a_playlist_url_downloads_video_files(build, gateway, tmp_path) -> None:
+    youtube = FakeYoutube(tmp_path=tmp_path)
+    service, jobs = build(youtube=youtube)
+    await service.submit(
+        submit_params("https://www.youtube.com/playlist?list=PLtestPlaylist12")
+    )
+    assert await jobs.wait_idle()
+    assert youtube.calls == []
+    assert youtube.video_calls[0][1] == "playlist"
+
+
+async def test_a_download_phrase_archives_a_playlist(build, gateway, tmp_path) -> None:
+    youtube = FakeYoutube(tmp_path=tmp_path)
+    service, jobs = build(youtube=youtube)
+    await service.submit(
+        submit_params("скачай https://www.youtube.com/playlist?list=PLtestPlaylist12")
+    )
+    assert await jobs.wait_idle()
+    assert youtube.calls == []
+    assert youtube.video_calls[0][1] == "playlist"
+
+
+async def test_a_playlist_is_transcribed_with_an_overview(
+    build, gateway, backend, tmp_path
+) -> None:
+    youtube = FakeYoutube(title="Курс по сетям", tmp_path=tmp_path)
+    stt = FakeStt(text="лекция про сети")
+    backend.reply = "# Курс по сетям\n\n## О чём подборка\nСети и протоколы.\n"
+    service, jobs = build(stt=stt, youtube=youtube)
+    await service.submit(
+        submit_params("конспект https://www.youtube.com/playlist?list=PLtestPlaylist12")
+    )
+    assert await jobs.wait_idle()
+    assert youtube.calls == ["https://www.youtube.com/playlist?list=PLtestPlaylist12"]
+    assert youtube.video_calls == []
+    assert len(stt.calls) == 2
+    documents = [
+        params
+        for method, params in gateway.delivered
+        if method == "telegram.send_document"
+    ]
+    names = [doc["filename"] for doc in documents]
+    assert names[0].endswith("обзор.md")
+    assert any("конспект.md" in name for name in names)
+    saved = list((tmp_path / "transcripts").rglob("*.md"))
+    assert any("обзор" in path.name for path in saved)
+    assert sum(1 for path in saved if "транскрипт" in path.name) == 2
+    assert any("Обзор подборки" in text for text in gateway.texts())
+
+
+async def test_a_channel_url_asks_which_mode(build, gateway, tmp_path) -> None:
+    youtube = FakeYoutube(tmp_path=tmp_path)
+    confirmations = FakeConfirmations(choice="transcribe")
+    stt = FakeStt(text="выпуск канала")
+    service, jobs = build(stt=stt, youtube=youtube, confirmations=confirmations)
+    await service.submit(submit_params("https://www.youtube.com/@veritasium"))
+    assert await jobs.wait_idle()
+    assert confirmations.calls
+    assert "канал" in confirmations.calls[0]["prompt_text"]
+    assert youtube.video_calls == []
+    assert youtube.calls
+
+
+async def test_a_bare_video_url_asks_which_mode(build, gateway, tmp_path) -> None:
+    youtube = FakeYoutube(title="Me at the zoo", tmp_path=tmp_path)
+    confirmations = FakeConfirmations(choice="download")
+    service, jobs = build(youtube=youtube, confirmations=confirmations)
+    await service.submit(submit_params("https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+    assert confirmations.calls
+    assert youtube.calls == []
+    assert youtube.video_calls == [("https://www.youtube.com/watch?v=jNQXAC9IVRw", "video")]
+    assert any("Сохранил на диск" in text for text in gateway.texts())
+
+
+async def test_a_plain_question_is_not_treated_as_youtube(build, gateway, backend, tmp_path) -> None:
+    service, jobs = build(youtube=FakeYoutube(tmp_path=tmp_path))
+    backend.reply = "Завтра созвон."
+    await service.submit(submit_params("что у меня завтра?"))
+    assert await jobs.wait_idle()
+    assert [
+        method for method, _ in gateway.delivered if method == "telegram.send_document"
+    ] == []
 
 
 # ---- helpers -------------------------------------------------------------------

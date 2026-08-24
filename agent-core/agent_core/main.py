@@ -29,6 +29,7 @@ from .rpc.handlers import CoreHandlers
 from .scheduler.service import Scheduler
 from .storage.database import Database
 from .storage.repositories import Repositories
+from .youtube import YoutubeDownloader
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ CAPABILITIES = [
     "memory",
     "contacts",
     "timers",
+    "youtube",
 ]
 
 
@@ -127,6 +129,8 @@ class Core:
                 workspace=self._settings.resolved_assistant_workspace,
                 chunk_chars=self._settings.transcript_chunk_chars,
             ),
+            youtube=YoutubeDownloader.from_settings(self._settings),
+            confirmations=self._confirmations,
         )
 
         self._scheduler = Scheduler(
@@ -205,13 +209,16 @@ class Core:
         if self._settings.stt_backend != "gpu":
             return self._local_stt()
 
-        from .stt.remote_gpu import RemoteGpuWhisperSTT
+        from .stt.gpu_service import GpuServiceSTT
 
-        gpu = RemoteGpuWhisperSTT(
-            config_path=self._settings.resolved_stt_gpu_config,
-            data_dir=self._settings.resolved_data_dir,
+        gpu = GpuServiceSTT(
+            base_url=self._settings.stt_gpu_url,
+            token=self._settings.stt_gpu_token,
             language=self._settings.stt_language,
             beam_size=self._settings.stt_beam_size,
+            poll_interval=self._settings.stt_gpu_poll_interval,
+            request_timeout=self._settings.stt_gpu_request_timeout,
+            upload_timeout=self._settings.stt_gpu_upload_timeout,
             max_concurrent=self._settings.stt_max_concurrent,
         )
         if not self._settings.stt_cpu_fallback:

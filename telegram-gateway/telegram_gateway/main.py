@@ -18,6 +18,7 @@ from .rpc.server import CoreLink
 from .storage.database import Database
 from .storage.models import GatewayStore
 from .telegram.handlers import build_router
+from .telegram.keyboard import BOT_COMMANDS
 from .telegram.renderer import TelegramRenderer
 
 log = logging.getLogger(__name__)
@@ -66,6 +67,10 @@ class Gateway:
 
         me = await self._bot.get_me()
         log.info("telegram bot @%s ready", me.username)
+        try:
+            await self._bot.set_my_commands(BOT_COMMANDS)
+        except Exception:
+            log.warning("could not publish bot commands", exc_info=True)
         self._polling = asyncio.ensure_future(
             self._dispatcher.start_polling(self._bot, handle_signals=False)
         )

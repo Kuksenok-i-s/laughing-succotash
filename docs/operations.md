@@ -1,6 +1,6 @@
 # Operations
 
-Installing, running and repairing the two halves of the system.
+Installing, running and repairing the parts of the system.
 
 ## Prerequisites
 
@@ -8,9 +8,13 @@ Installing, running and repairing the two halves of the system.
 | --- | --- |
 | Gateway (Linux) | Python 3.12+, a domain with a TLS certificate, a Telegram bot token |
 | Core (Intel Mac mini) | Python 3.12+, `ffmpeg`, `cursor-agent` logged in, ~4 GB free for model weights |
+| GPU host (optional, Linux) | An NVIDIA GPU, `ffmpeg`, a virtualenv with `faster-whisper`, ~4 GB for weights |
 
 The Gateway must be reachable from the Core; the Core needs no inbound access at all. That
 asymmetry is deliberate — see [ADR 0002](adr/0002-jsonrpc-over-websocket.md).
+
+The GPU host is only needed for `STT_BACKEND=gpu`, and only has to be reachable from the Core over
+the LAN. Without it the Core transcribes on its own CPU, which works and is merely slow.
 
 ## Shared secret
 
@@ -108,6 +112,57 @@ is not running is a reminder that does not fire.
 The first voice message downloads the large-v3 weights (~3 GB). Warm them up deliberately if you
 would rather not have that happen mid-conversation.
 
+## GPU host (optional, Linux with an NVIDIA card)
+
+Skip this unless transcription on the Mini's CPU is too slow to live with. The service is
+`gpu-transcriber`; what it is and why it replaced an SSH pipeline is in
+[ADR 0008](adr/0008-transcription-service-on-the-gpu-host.md).
+
+```bash
+git clone <repo> ~/gpu-transcriber/src
+python3 -m venv ~/.assistant/venv-whisper
+~/.assistant/venv-whisper/bin/pip install -r ~/gpu-transcriber/src/gpu-transcriber/requirements.txt
+```
+
+The service is never installed into the virtualenv: the unit puts the checkout's
+`gpu-transcriber/` directory on `PYTHONPATH`, so an upgrade is a `git pull` and a restart. If the
+checkout lives somewhere other than `~/gpu-transcriber/src`, that one line in the unit changes.
+
+```bash
+install -d -m 700 ~/.config/gpu-transcriber
+install -m 600 ~/gpu-transcriber/src/gpu-transcriber/service.env.example \
+        ~/.config/gpu-transcriber/service.env
+openssl rand -base64 48        # GPU_STT_TOKEN here and in the Core's STT_GPU_TOKEN
+"${EDITOR:-vi}" ~/.config/gpu-transcriber/service.env
+```
+
+It runs as a **user unit**, because there is no passwordless `sudo` on this machine and none is
+needed. Lingering must be on, or the service will stop when the session ends:
+
+```bash
+loginctl enable-linger "$USER"          # needs sudo once; check with `loginctl show-user $USER -p Linger`
+cp ~/gpu-transcriber/src/deploy/systemd/gpu-transcriber.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now gpu-transcriber
+journalctl --user -u gpu-transcriber -f
+```
+
+`LD_LIBRARY_PATH` in the unit is not optional: `ctranslate2` loads cuBLAS from the `nvidia` wheels
+inside the virtualenv and will not find them on its own. If the Python version in the virtualenv
+changes, that path changes with it.
+
+Verify from the Mini, which is the only client that matters:
+
+```bash
+curl -sf http://<gpu-host>:17493/health
+```
+
+`model_loaded: false` right after a start is correct: on an RTX 4080 the weights took 85 seconds
+from cold disk and 2 seconds on an immediate restart. Jobs queue meanwhile rather than fail.
+Then set `STT_BACKEND=gpu`, `STT_GPU_URL` and `STT_GPU_TOKEN` in the Core's `.env` and restart it.
+The Core logs `transcription service ready at ...` at startup; a `transcription service unreachable`
+there means the token, the address or the firewall.
+
 ## First run checklist
 
 1. `journalctl -u telegram-gateway` shows `core ... connected (capabilities: ...)`.
@@ -131,7 +186,15 @@ sudo systemctl restart telegram-gateway
 # Core
 cd ~/agent-core-src && git pull
 launchctl kickstart -k gui/$(id -u)/com.assistant.agent-core
+
+# GPU host, if used
+cd ~/gpu-transcriber/src && git pull
+systemctl --user restart gpu-transcriber
 ```
+
+Restarting the transcription service loses a job in flight; the Core notices, says so in Telegram
+and finishes the recording on its CPU. Restarting it while nothing is being transcribed costs
+nothing but the model load.
 
 Database migrations run automatically at startup and are additive only.
 
@@ -160,7 +223,18 @@ job is marked failed at next startup rather than left claiming to run.
 **Transcription is very slow** — expected. large-v3 on an Intel CPU runs at roughly real time or
 slower. `STT_MAX_CONCURRENT=1` is deliberate: two parallel runs on this hardware are slower than
 two sequential ones and risk the memory of the whole process. If it is unusable, `STT_MODEL=medium`
-trades accuracy for speed, against the stated priority.
+trades accuracy for speed, against the stated priority. The other way out is the GPU host.
+
+**"GPU недоступен — расшифровываю на CPU"** — the transcription service refused, timed out or
+failed the job, and the recording went to the Mini's processor. The reason is in the Core's log
+(`transcription service ... failed`) and, if the service was up enough to log at all, in
+`journalctl --user -u gpu-transcriber`. Common causes: the service was restarting, the model was
+still loading, or `LD_LIBRARY_PATH` in the unit no longer matches the virtualenv's Python version,
+in which case the log shows a cuBLAS load failure and nothing is ever transcribed there.
+
+**The percentage does not move** — the Core polls the service every two seconds and only edits the
+Telegram message when the number changes. A number that is frozen for fifteen minutes makes the
+Core give up on the job and fall back to the CPU rather than wait forever.
 
 **Reminders fire late** — check that the Core was running. The scheduler catches up on startup and
 fires anything overdue, so a late reminder after a reboot is the designed behaviour rather than a
@@ -172,10 +246,12 @@ lost one.
 | --- | --- | --- |
 | Reminders, tasks, notes, memory, contacts, calendar, sessions | Core | Everything the assistant knows |
 | Pending requests, pending uploads, delivery state, callback tokens | Gateway | A few in-flight messages |
+| Audio being transcribed, and nothing else | GPU host | The job that was running |
 
 Back up `~/.personal-assistant/core.sqlite3`. The Gateway's database is not worth backing up, which
 is the point of keeping it purely transport state.
 
-Audio is never kept. The Gateway deletes its copy once the Core acknowledges the upload, and the
-Core deletes its copy once transcription finishes — success or failure. The transcript is the useful
-artefact; the recording is the sensitive one.
+Audio is never kept. The Gateway deletes its copy once the Core acknowledges the upload, the Core
+deletes its copy once transcription finishes — success or failure — and the GPU service deletes its
+spooled copy when the Core collects the result, or on a TTL sweep if nobody ever does. The
+transcript is the useful artefact; the recording is the sensitive one.

@@ -19,13 +19,17 @@ TimeoutStopSec=30
 Restart=always
 RestartSec=5
 
-# The Gateway is the exposed component, so it gets the smaller blast radius: no new privileges, a
-# private /tmp, and a read-only system apart from its own state directory.
+# The Gateway is the exposed component, so it gets the smaller blast radius: no new privileges
+# and a read-only system apart from its own state directory. Audio and Python tempfile stay in
+# DATA_DIR/tmp — never the host's /tmp (tmpfs, PrivateTmp, and a place secrets have leaked).
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/telegram-gateway
+Environment=TMPDIR=/var/lib/telegram-gateway/tmp
+Environment=TEMP=/var/lib/telegram-gateway/tmp
+Environment=TMP=/var/lib/telegram-gateway/tmp
 StateDirectory=telegram-gateway
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -33,7 +37,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# MemoryDenyWriteExecute breaks CPython (it needs executable mappings).
 
 StandardOutput=journal
 StandardError=journal

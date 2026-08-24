@@ -41,14 +41,20 @@ yes. See [ADR 0007](docs/adr/0007-tool-permission-model.md).
 | --- | --- |
 | `telegram-gateway/` | Deploy unit A — the Telegram side |
 | `agent-core/` | Deploy unit B — everything else |
+| `gpu-transcriber/` | Deploy unit C — optional; whisper on a GPU host behind an HTTP API |
 | `packages/pa-protocol/` | The wire protocol both sides share |
 | `tests/` | End-to-end tests that run both units together |
 | `deploy/` | systemd, launchd and nginx examples |
 | `docs/` | Protocol specification, ACP findings, ADRs, operations |
 
-The two units are independently deployable and never import each other. The only thing they share
-is `pa-protocol`, which contains the frame codec, the JSON-RPC peer and the Pydantic models for
-every method — so a protocol change breaks both sides at import time rather than at runtime.
+The Gateway and the Core are independently deployable and never import each other. The only thing
+they share is `pa-protocol`, which contains the frame codec, the JSON-RPC peer and the Pydantic
+models for every method — so a protocol change breaks both sides at import time rather than at
+runtime.
+
+`gpu-transcriber/` is optional and shares nothing at all: the Core reaches it over plain HTTP on the
+LAN, and falls back to transcribing on its own CPU when it is absent. See
+[ADR 0008](docs/adr/0008-transcription-service-on-the-gpu-host.md).
 
 ## Documentation
 

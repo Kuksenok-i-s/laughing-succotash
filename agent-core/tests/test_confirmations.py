@@ -107,5 +107,39 @@ async def test_a_resolution_after_a_restart_is_reported_not_lost(repos, gateway)
     assert await service.resolve(action.action_id, "tg:1", "approve") == "applied"
 
 
+async def test_request_choice_returns_the_button_id(service, gateway) -> None:
+    task = asyncio.ensure_future(
+        service.request_choice(
+            user_id="tg:1",
+            chat_id=500,
+            tool_name="youtube.mode",
+            arguments={"url": "https://www.youtube.com/watch?v=jNQXAC9IVRw"},
+            operation_id="op-yt",
+            tier="youtube",
+            prompt_text="Что сделать?",
+            actions=[
+                methods.ConfirmAction(id="transcribe", label="Конспект", style="primary"),
+                methods.ConfirmAction(id="download", label="Скачать видео", style="secondary"),
+                methods.ConfirmAction(id="reject", label="Отмена", style="danger"),
+            ],
+        )
+    )
+    action_id = None
+    for _ in range(200):
+        confirms = [p for m, p in gateway.delivered if m == methods.TELEGRAM_CONFIRM]
+        if confirms:
+            action_id = confirms[0]["action_id"]
+            break
+        await asyncio.sleep(0.01)
+    assert action_id is not None
+    assert [action["id"] for action in confirms[0]["actions"]] == [
+        "transcribe",
+        "download",
+        "reject",
+    ]
+    await service.resolve(action_id, "tg:1", "download")
+    assert await task == "download"
+
+
 async def test_unknown_actions_are_reported_as_unknown(service) -> None:
     assert await service.resolve("does-not-exist", "tg:1", "approve") == "unknown"

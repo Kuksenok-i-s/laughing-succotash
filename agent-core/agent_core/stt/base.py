@@ -7,9 +7,20 @@ when transcription actually runs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+
+# Both hooks are invoked on the event loop thread, whatever thread the backend does its work on:
+# callers schedule coroutines from them, which is illegal anywhere else. A backend that transcribes
+# in a worker thread must marshal its callbacks with ``loop.call_soon_threadsafe``.
+ProgressHook = Callable[[float], None]
+NoticeHook = Callable[[str], None]
+
+# A backend reports a degraded run through the notice hook so the caller can tell the user why the
+# wait got longer. Stable identifier: the wording belongs to the Gateway, not here.
+STT_CPU_FALLBACK = "stt_cpu_fallback"
 
 
 @dataclass(slots=True)
@@ -43,7 +54,13 @@ class SttError(RuntimeError):
 
 
 class SpeechToText(Protocol):
-    async def transcribe(self, audio_path: Path) -> TranscriptionResult: ...
+    async def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        on_progress: ProgressHook | None = None,
+        on_notice: NoticeHook | None = None,
+    ) -> TranscriptionResult: ...
 
     async def warmup(self) -> None: ...
 

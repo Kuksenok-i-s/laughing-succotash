@@ -1,0 +1,52 @@
+[Unit]
+# A user unit, not a system one: there is no passwordless sudo on the GPU host, but lingering is
+# enabled, so the service starts at boot without anyone logging in.
+# Install to ~/.config/systemd/user/ and enable with `systemctl --user enable --now gpu-transcriber`.
+Description=GPU transcription service (faster-whisper behind an HTTP API)
+Documentation=https://github.com/yourname/personal-assistant/blob/main/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/gpu-transcriber/src
+EnvironmentFile=%h/.config/gpu-transcriber/service.env
+
+# The code is not installed into the virtualenv; the virtualenv only provides faster-whisper. This
+# keeps updates to a git pull and a restart, with nothing to reinstall. The path is the deploy unit
+# inside the checkout — the directory that contains the `gpu_transcriber` package.
+Environment=PYTHONPATH=%h/gpu-transcriber/src/gpu-transcriber
+Environment=PYTHONUNBUFFERED=1
+
+# ctranslate2 loads cuBLAS from the nvidia wheels inside the virtualenv and will not find them on
+# its own. Missing this is a hard failure at model load, not a slow fallback.
+Environment=LD_LIBRARY_PATH=%h/.assistant/venv-whisper/lib/python3.14/site-packages/nvidia/cublas/lib:%h/.assistant/venv-whisper/lib/python3.14/site-packages/nvidia/cuda_runtime/lib
+
+# Never the host's /tmp: audio spool and Python tempfiles stay in the service's own directory.
+Environment=TMPDIR=%h/.gpu-transcriber/tmp
+Environment=TEMP=%h/.gpu-transcriber/tmp
+Environment=TMP=%h/.gpu-transcriber/tmp
+
+ExecStart=%h/.assistant/venv-whisper/bin/python -m gpu_transcriber.main
+
+# SIGTERM stops the HTTP listener and the sweeper. A transcription in flight is not waited for: the
+# Core treats a lost job as a failure and moves it to the CPU, which is faster than blocking a
+# restart on an hour of audio.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# No ProtectHome or ProtectSystem: the interpreter, the CUDA libraries, the model cache and the
+# work directory all live under $HOME.
+# No MemoryDenyWriteExecute: CPython needs executable mappings.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpu-transcriber
+
+[Install]
+WantedBy=default.target

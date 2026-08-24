@@ -256,6 +256,18 @@ Telegram-specific encoding — including callback data, which the Core never con
 Result `{"message_id":4712,"dedup":false}`. Text longer than the Telegram limit is split by the
 Gateway on paragraph, then line, then hard boundaries; `message_id` is the last part.
 
+### `telegram.send_document`
+
+```json
+{"delivery_id":"01K...","user_id":"tg:123456789","chat_id":123456789,
+ "filename":"Касперская — конспект.md","content":"# …","mime_type":"text/markdown",
+ "caption":"Конспект","parse_mode":"markdown"}
+```
+
+A downloadable Telegram document. `content` is UTF-8 text (markdown transcripts and notes);
+the Gateway encodes it. Result `{"message_id","dedup"}` with the same at-least-once rule as
+`telegram.send`.
+
 ### `telegram.edit`
 `{"delivery_id","chat_id","message_id","text","parse_mode"}` → `{"edited":true}`. Used to update a
 single status message in place instead of spamming progress lines. An edit whose text is unchanged
@@ -290,8 +302,11 @@ design. On press it calls `confirmation.resolve` and never acts on the decision 
  "detail":"12 of 28 minutes"}
 ```
 
-Stages: `queued`, `downloading`, `transcribing`, `summarizing`, `agent`, `executing_tool`,
-`waiting_confirmation`, `completed`.
+Stages: `queued`, `downloading`, `transcribing`, `transcribing_cpu`, `summarizing`, `agent`,
+`executing_tool`, `waiting_confirmation`, `completed`.
+
+`transcribing_cpu` is the same work as `transcribing` after the GPU host turned out to be
+unusable: the Core switched to local CPU whisper, so the remaining wait is much longer.
 
 Progress is advisory and **not durable** — dropping it on a disconnect is correct. The Gateway
 coalesces progress into one edited status message per job and rate-limits edits to at most one

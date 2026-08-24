@@ -15,14 +15,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
 from pathlib import Path
 
-from .base import SpeechToText, SttError, TranscriptionResult, TranscriptSegment
+from .base import (
+    NoticeHook,
+    ProgressHook,
+    SpeechToText,
+    SttError,
+    TranscriptionResult,
+    TranscriptSegment,
+)
 
 log = logging.getLogger(__name__)
-
-ProgressHook = Callable[[float], None]
 
 
 class FasterWhisperSTT(SpeechToText):
@@ -103,7 +107,11 @@ class FasterWhisperSTT(SpeechToText):
         return WhisperModel(self._model_name, **kwargs)
 
     async def transcribe(
-        self, audio_path: Path, *, on_progress: ProgressHook | None = None
+        self,
+        audio_path: Path,
+        *,
+        on_progress: ProgressHook | None = None,
+        on_notice: NoticeHook | None = None,
     ) -> TranscriptionResult:
         if not audio_path.exists():
             raise SttError(f"audio file not found: {audio_path.name}")

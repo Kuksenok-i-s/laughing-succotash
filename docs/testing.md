@@ -1,21 +1,22 @@
 # Testing
 
 ```bash
-./scripts/test.sh              # all four suites
+./scripts/test.sh              # all five suites
 ./scripts/test.sh -v -k audio  # arguments are forwarded to pytest
 ```
 
-Four separate pytest runs, because the two deploy units each own a top-level `tests` package and
-must be testable on their own machine without this repository's root config:
+Five separate pytest runs, because each deploy unit owns a top-level `tests` package and must be
+testable on its own machine without this repository's root config:
 
 | Suite | Command | What it covers |
 | --- | --- | --- |
 | Protocol | `pytest packages/pa-protocol/tests` | Frame codec, JSON-RPC peer, ids, errors |
 | Core | `pytest agent-core` | Storage, permissions, jobs, STT plumbing, MCP, scheduler, transcripts |
 | Gateway | `pytest telegram-gateway` | Handlers, renderer, submission queue, formatting |
+| GPU service | `pytest gpu-transcriber` | The HTTP contract, job registry, TTL sweep, GPU worker |
 | End-to-end | `pytest tests` | Both units running together over a real WebSocket |
 
-Nothing requires Cursor, Whisper, a Telegram token or network access.
+Nothing requires Cursor, Whisper, a GPU, a Telegram token or network access beyond loopback.
 
 ## What is faked, and what deliberately is not
 
@@ -72,6 +73,20 @@ The awkward cases have named tests rather than prose:
   (`test_a_whisper_failure_fails_the_job_and_the_core_survives`).
 - **Core restart** — jobs left "running" by a killed process are failed at startup instead of
   lying in `/status` forever.
+
+## The GPU service suite
+
+`gpu-transcriber/tests` runs the real `ThreadingHTTPServer` on an ephemeral port and fakes only the
+whisper engine. Everything that broke in the SSH pipeline this service replaced was in that layer:
+`test_progress_is_visible_over_http_while_the_job_runs` holds the fake engine mid-transcription and
+asserts the percentage over HTTP, `test_a_job_id_that_is_not_a_plain_name_is_refused` covers path
+traversal through the job id, and `test_audio_left_behind_by_a_previous_run_is_swept` covers the
+only thing on that machine that grows without bound.
+
+The Core's half is `agent-core/tests/test_stt_gpu_service.py`, against a scripted stub service. It
+asserts the progress hook arrives on the event loop thread — the exact contract whose violation sent
+every GPU job silently to the CPU — that a collected or failed job is deleted, and that a service
+failure surfaces as `SttError` so `FallbackSTT` takes over.
 
 ## Permission and injection boundary
 

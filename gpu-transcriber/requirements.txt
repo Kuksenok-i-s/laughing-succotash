@@ -1,0 +1,9 @@
+# Transcription service runtime dependencies (Linux host with an NVIDIA GPU).
+#
+# Deliberately one line. The HTTP surface is standard library only, because this runs inside the
+# virtualenv that already holds Whisper on the GPU host, and adding wheels to a fresh CPython for
+# the sake of five endpoints is a risk with no return.
+#
+# ffmpeg must be present on PATH: faster-whisper decodes uploads with it.
+
+faster-whisper>=1.0

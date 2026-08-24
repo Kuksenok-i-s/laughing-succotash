@@ -63,6 +63,7 @@ class HandlerBot(Bot):
     def __init__(self, token: str, audio: bytes = b"opus") -> None:
         super().__init__(token=token)
         self.answers: list[str] = []
+        self.reply_markups: list = []
         self.callback_answers: list[str] = []
         self.markup_cleared = 0
         self._audio = audio
@@ -71,6 +72,7 @@ class HandlerBot(Bot):
         name = type(method).__name__
         if name == "SendMessage":
             self.answers.append(method.text)
+            self.reply_markups.append(method.reply_markup)
             return _message(message_id=9000 + len(self.answers), text=method.text, bot=self)
         if name == "AnswerCallbackQuery":
             self.callback_answers.append(method.text or "")
@@ -181,6 +183,12 @@ async def test_start_and_help_answer_locally(wired, bot, store) -> None:
     assert len(bot.answers) == 2
     assert core.calls == []
     assert await store.pending_requests() == []
+    from aiogram.types import ReplyKeyboardMarkup
+
+    assert isinstance(bot.reply_markups[0], ReplyKeyboardMarkup)
+    labels = [button.text for row in bot.reply_markups[0].keyboard for button in row]
+    assert "Статус" in labels
+    assert "Скрыть кнопки" in labels
 
 
 async def test_new_asks_the_core_to_reset_the_session(wired, bot) -> None:
@@ -242,6 +250,51 @@ async def test_status_works_without_the_core(wired, bot, store) -> None:
 
     assert "Core: disconnected" in bot.answers[0]
     assert "Отложенных запросов: 1" in bot.answers[0]
+
+
+async def test_a_keyboard_button_runs_the_matching_command(wired, bot) -> None:
+    dispatcher, core, _ = wired
+
+    await feed(dispatcher, bot, message=_message(text="Новый разговор"))
+
+    assert [method for method, _ in core.calls] == [methods.SESSION_RESET]
+    assert "новый разговор" in bot.answers[0]
+
+
+async def test_status_button_is_not_sent_to_the_assistant(wired, bot, store) -> None:
+    dispatcher, core, _ = wired
+    core.result = {
+        "core": {"instance_id": "home-macmini"},
+        "cursor": {"state": "ready"},
+        "stt": {"state": "ready", "model": "large-v3"},
+        "scheduler": {"state": "ready", "pending_reminders": 0},
+        "jobs": {"running": 0, "queued": 0},
+    }
+
+    await feed(dispatcher, bot, message=_message(text="Статус"))
+
+    assert await store.pending_requests() == []
+    assert "Core: connected (home-macmini)" in bot.answers[0]
+
+
+async def test_hide_keyboard_removes_the_markup(wired, bot, store) -> None:
+    dispatcher, core, _ = wired
+    from aiogram.types import ReplyKeyboardRemove
+
+    await feed(dispatcher, bot, message=_message(text="Скрыть кнопки"))
+
+    assert core.calls == []
+    assert await store.pending_requests() == []
+    assert isinstance(bot.reply_markups[0], ReplyKeyboardRemove)
+
+
+async def test_keyboard_command_restores_the_markup(wired, bot) -> None:
+    dispatcher, _core, _ = wired
+    from aiogram.types import ReplyKeyboardMarkup
+
+    await feed(dispatcher, bot, message=_message(text="/keyboard"))
+
+    assert isinstance(bot.reply_markups[0], ReplyKeyboardMarkup)
 
 
 # ---- audio ---------------------------------------------------------------
@@ -379,6 +432,18 @@ async def test_a_button_press_becomes_a_confirmation_resolve(wired, bot, store) 
     assert bot.callback_answers == ["Принято."]
     # The keyboard is stripped so the same decision cannot be pressed twice.
     assert bot.markup_cleared == 1
+
+
+async def test_a_youtube_mode_button_forwards_the_choice(wired, bot, store) -> None:
+    dispatcher, core, _ = wired
+    core.result = {"status": "applied"}
+    token = await _register(store, choice="download")
+
+    await feed(dispatcher, bot, callback_query=_query(token, bot=bot))
+
+    method, params = core.calls[0]
+    assert method == methods.CONFIRMATION_RESOLVE
+    assert params["choice"] == "download"
 
 
 async def test_someone_elses_button_is_refused(wired, bot, store) -> None:

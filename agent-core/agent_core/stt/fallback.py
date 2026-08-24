@@ -8,14 +8,17 @@ That avoids paying an SSH connect timeout on every voice message.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
 
-from .base import SpeechToText, TranscriptionResult
+from .base import (
+    STT_CPU_FALLBACK,
+    NoticeHook,
+    ProgressHook,
+    SpeechToText,
+    TranscriptionResult,
+)
 
 log = logging.getLogger(__name__)
-
-ProgressHook = Callable[[float], None]
 
 
 class FallbackSTT:
@@ -49,14 +52,36 @@ class FallbackSTT:
         await self._fallback.close()
 
     async def transcribe(
-        self, audio_path: Path, *, on_progress: ProgressHook | None = None
+        self,
+        audio_path: Path,
+        *,
+        on_progress: ProgressHook | None = None,
+        on_notice: NoticeHook | None = None,
     ) -> TranscriptionResult:
         if self._active is self._fallback:
-            return await self._fallback.transcribe(audio_path, on_progress=on_progress)
+            # Already degraded from an earlier failure: the caller still has to be told, otherwise
+            # only the first recording after the switch explains the slower run.
+            if on_notice is not None:
+                on_notice(STT_CPU_FALLBACK)
+            return await self._transcribe_on_cpu(audio_path, on_progress, on_notice)
         try:
-            return await self._primary.transcribe(audio_path, on_progress=on_progress)
+            return await self._primary.transcribe(
+                audio_path, on_progress=on_progress, on_notice=on_notice
+            )
         except Exception as exc:
             log.warning("primary STT failed (%s); switching to CPU fallback", exc)
             await self._fallback.warmup()
             self._active = self._fallback
-            return await self._fallback.transcribe(audio_path, on_progress=on_progress)
+            if on_notice is not None:
+                on_notice(STT_CPU_FALLBACK)
+            return await self._transcribe_on_cpu(audio_path, on_progress, on_notice)
+
+    async def _transcribe_on_cpu(
+        self,
+        audio_path: Path,
+        on_progress: ProgressHook | None,
+        on_notice: NoticeHook | None,
+    ) -> TranscriptionResult:
+        return await self._fallback.transcribe(
+            audio_path, on_progress=on_progress, on_notice=on_notice
+        )

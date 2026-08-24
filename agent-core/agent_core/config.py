@@ -93,9 +93,13 @@ class Settings(BaseSettings):
     mcp_token: str = ""
 
     # --- STT ---
-    # local = faster-whisper on this machine; gpu = remote CUDA host via transcription.gpu_remote.
+    # local = faster-whisper on this machine; gpu = the transcription service on the CUDA host.
     stt_backend: str = "local"
-    stt_gpu_config: Path | None = None
+    stt_gpu_url: str = "http://127.0.0.1:17493"
+    stt_gpu_token: str = ""
+    stt_gpu_poll_interval: float = 2.0
+    stt_gpu_request_timeout: float = 30.0
+    stt_gpu_upload_timeout: float = 900.0
     # When STT_BACKEND=gpu, try local CPU whisper if the GPU host is unreachable. Off = fail.
     stt_cpu_fallback: bool = True
     stt_model: str = "large-v3"
@@ -108,6 +112,10 @@ class Settings(BaseSettings):
     max_audio_size_mb: int = 500
     max_audio_duration_seconds: int = 14400
     upload_idle_timeout: float = 300.0
+
+    # --- YouTube ---
+    # yt-dlp runs on the proxy VPS over SSH; the toml holds that host and its key.
+    youtube_config: Path | None = None
 
     # --- Behaviour ---
     default_timezone: str = "Europe/Moscow"
@@ -196,9 +204,10 @@ class Settings(BaseSettings):
         return {name: ProjectConfig(**cfg) for name, cfg in raw.items()}
 
     @cached_property
-    def resolved_stt_gpu_config(self) -> Path:
-        if self.stt_gpu_config is not None:
-            return self.stt_gpu_config.expanduser().resolve()
+    def resolved_youtube_config(self) -> Path:
+        """Where the YouTube worker's SSH settings live. Unrelated to the GPU service."""
+        if self.youtube_config is not None:
+            return self.youtube_config.expanduser().resolve()
         return self.resolved_data_dir / "youtube" / "config.toml"
 
     @cached_property
@@ -214,6 +223,8 @@ class Settings(BaseSettings):
             problems.append("CORE_TOKEN is shorter than 32 characters")
         if not self.mcp_token:
             problems.append("MCP_TOKEN is not set")
+        if self.stt_backend == "gpu" and not self.stt_gpu_token:
+            problems.append("STT_GPU_TOKEN is not set but STT_BACKEND=gpu")
         if not self.allowed_users:
             problems.append("ALLOWED_USERS is empty; the Core would accept nobody")
         for user in self.allowed_users:

@@ -13,7 +13,7 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from pa_protocol import RpcError, errors, methods
 
 from ..storage.models import GatewayStore
@@ -31,6 +31,7 @@ class TelegramRenderer:
     def handlers(self) -> dict[str, Any]:
         return {
             methods.TELEGRAM_SEND: self.send,
+            methods.TELEGRAM_SEND_DOCUMENT: self.send_document,
             methods.TELEGRAM_EDIT: self.edit,
             methods.TELEGRAM_DELETE: self.delete,
             methods.TELEGRAM_ACTION: self.action,
@@ -79,6 +80,58 @@ class TelegramRenderer:
             params.delivery_id, chat_id=params.chat_id, message_id=message_id
         )
         return methods.dump(methods.TelegramSendResult(message_id=message_id, dedup=False))
+
+    async def send_document(self, raw: dict[str, Any]) -> dict[str, Any]:
+        params = methods.TelegramSendDocumentParams.model_validate(raw)
+
+        is_new, existing_message_id = await self._store.claim_delivery(
+            params.delivery_id, methods.TELEGRAM_SEND_DOCUMENT
+        )
+        if not is_new:
+            log.info("duplicate document delivery %s ignored", params.delivery_id)
+            return methods.dump(
+                methods.TelegramSendDocumentResult(
+                    message_id=existing_message_id, dedup=True
+                )
+            )
+
+        filename = (params.filename or "document.md").replace("\\", "/").rsplit("/", 1)[-1]
+        if not filename.strip():
+            filename = "document.md"
+        document = BufferedInputFile(
+            params.content.encode("utf-8"), filename=filename
+        )
+        caption = (params.caption or "").strip() or None
+        try:
+            message = await self._call_with_retry(
+                self._bot.send_document,
+                chat_id=params.chat_id,
+                document=document,
+                caption=caption[:1024] if caption else None,
+                parse_mode=(
+                    "Markdown" if caption and params.parse_mode == "markdown" else None
+                ),
+                reply_to_message_id=params.reply_to_message_id,
+                disable_notification=params.silent,
+            )
+        except TelegramForbiddenError as exc:
+            await self._store.complete_delivery(
+                params.delivery_id, chat_id=params.chat_id, message_id=None
+            )
+            raise RpcError(errors.TELEGRAM_BLOCKED, "telegram_blocked", {"detail": str(exc)})
+        except Exception as exc:
+            await self._store.release_delivery(params.delivery_id)
+            raise RpcError(
+                errors.TELEGRAM_SEND_FAILED, "telegram_send_failed", {"detail": str(exc)[:200]}
+            )
+
+        message_id = getattr(message, "message_id", None)
+        await self._store.complete_delivery(
+            params.delivery_id, chat_id=params.chat_id, message_id=message_id
+        )
+        return methods.dump(
+            methods.TelegramSendDocumentResult(message_id=message_id, dedup=False)
+        )
 
     async def _send_parts(
         self, *, chat_id: int, text: str, parse_mode: str,
@@ -224,7 +277,7 @@ class TelegramRenderer:
         if params.chat_id is None:
             return {}
 
-        text = describe_stage(params.stage, params.detail)
+        text = describe_stage(params.stage, params.detail, params.progress)
         existing = await self._store.get_status_message(params.job_id)
 
         if existing is None:

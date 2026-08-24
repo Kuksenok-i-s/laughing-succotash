@@ -53,6 +53,7 @@ class FakeBot:
 
     def __init__(self) -> None:
         self.sent: list[SentMessage] = []
+        self.documents: list[SentDocument] = []
         self.edits: list[tuple[int, int, str]] = []
         self.deleted: list[tuple[int, int]] = []
         self.actions: list[tuple[int, str]] = []
@@ -80,8 +81,34 @@ class FakeBot:
     async def send_chat_action(self, chat_id: int, action: str) -> None:
         self.actions.append((chat_id, action))
 
+    async def send_document(
+        self, chat_id: int, document, caption=None, parse_mode=None, **kwargs
+    ) -> SentMessage:
+        if self.fail_next is not None:
+            error, self.fail_next = self.fail_next, None
+            raise error
+        filename = getattr(document, "filename", "file")
+        data = getattr(document, "data", None)
+        if data is None:
+            data = bytes(document) if not hasattr(document, "read") else document.read()
+        self._next_id += 1
+        record = SentDocument(chat_id, filename, data, caption, self._next_id)
+        self.documents.append(record)
+        message = SentMessage(chat_id, caption or "", self._next_id, parse_mode, None)
+        self.sent.append(message)
+        return message
+
     def texts(self) -> list[str]:
         return [message.text for message in self.sent]
+
+
+@dataclass
+class SentDocument:
+    chat_id: int
+    filename: str
+    content: bytes
+    caption: str | None
+    message_id: int
 
 
 @pytest.fixture

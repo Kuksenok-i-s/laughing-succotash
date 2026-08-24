@@ -21,6 +21,7 @@ class _Payload(BaseModel):
 # --- Gateway-facing method names (Core calls these) ----------------------
 
 TELEGRAM_SEND = "telegram.send"
+TELEGRAM_SEND_DOCUMENT = "telegram.send_document"
 TELEGRAM_EDIT = "telegram.edit"
 TELEGRAM_DELETE = "telegram.delete"
 TELEGRAM_ACTION = "telegram.action"
@@ -45,6 +46,9 @@ Stage = Literal[
     "queued",
     "downloading",
     "transcribing",
+    # Same work as `transcribing`, but the GPU host was unusable and the Core fell back to local
+    # CPU whisper. A separate stage because the user needs to know why the wait grew.
+    "transcribing_cpu",
     "summarizing",
     "agent",
     "executing_tool",
@@ -140,7 +144,7 @@ class JobCancelResult(_Payload):
 class ConfirmationResolveParams(_Payload):
     action_id: str
     user_id: str
-    choice: Literal["approve", "reject"]
+    choice: str
     resolved_at: datetime | None = None
 
 
@@ -176,6 +180,26 @@ class TelegramSendParams(_Payload):
 
 
 class TelegramSendResult(_Payload):
+    message_id: int | None = None
+    dedup: bool = False
+
+
+class TelegramSendDocumentParams(_Payload):
+    """A downloadable file. ``content`` is UTF-8 text; the Gateway encodes it for Telegram."""
+
+    delivery_id: str
+    user_id: str
+    chat_id: int
+    filename: str
+    content: str
+    mime_type: str = "text/markdown"
+    caption: str | None = None
+    parse_mode: Literal["markdown", "plain"] = "markdown"
+    reply_to_message_id: int | None = None
+    silent: bool = False
+
+
+class TelegramSendDocumentResult(_Payload):
     message_id: int | None = None
     dedup: bool = False
 
