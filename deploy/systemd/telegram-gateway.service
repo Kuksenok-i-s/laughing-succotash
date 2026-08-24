@@ -1,0 +1,43 @@
+[Unit]
+Description=Telegram Gateway (personal assistant transport adapter)
+Documentation=https://github.com/yourname/personal-assistant/blob/main/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=assistant
+Group=assistant
+WorkingDirectory=/opt/telegram-gateway
+EnvironmentFile=/etc/telegram-gateway/gateway.env
+ExecStart=/opt/telegram-gateway/.venv/bin/python -m telegram_gateway.main
+
+# SIGTERM is the graceful path: polling stops, the queue is already durable on disk, the WebSocket
+# and SQLite are closed. 30s is generous for that; anything longer means something is wedged.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+# The Gateway is the exposed component, so it gets the smaller blast radius: no new privileges, a
+# private /tmp, and a read-only system apart from its own state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/telegram-gateway
+StateDirectory=telegram-gateway
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-gateway
+
+[Install]
+WantedBy=multi-user.target

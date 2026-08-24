@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Agent Core under launchd on the Intel Mac mini.
+
+  Install as a user agent, not a daemon:
+      cp com.assistant.agent-core.plist ~/Library/LaunchAgents/
+      launchctl load -w ~/Library/LaunchAgents/com.assistant.agent-core.plist
+
+  It must be a user agent because Cursor Agent authenticates as the logged-in user and reads its
+  credentials from the user's keychain and home directory; a root LaunchDaemon would have neither.
+  The consequence is that the Mac must be set to log this user in automatically after a reboot,
+  otherwise the Core does not start until someone signs in.
+
+  Secrets are not listed here. This file is world-readable; the tokens live in the .env file that
+  the Core reads from its working directory (chmod 600).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.assistant.agent-core</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/me/agent-core/.venv/bin/python</string>
+        <string>-m</string>
+        <string>agent_core.main</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/me/agent-core</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- launchd gives an agent a minimal PATH; cursor-agent, ffmpeg and ffprobe all have to be
+             findable or the Core comes up degraded. -->
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/me/.local/bin</string>
+        <key>LOG_FORMAT</key>
+        <string>json</string>
+        <!-- Whisper is CPU-bound; leaving a core free keeps the machine usable while an hour of
+             audio is being transcribed. -->
+        <key>OMP_NUM_THREADS</key>
+        <string>3</string>
+    </dict>
+
+    <!-- Start at login and keep it alive: the scheduler is the source of truth for reminders, so a
+         Core that is not running is a reminder that does not fire. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- SIGTERM is the graceful path: stop taking jobs, finish or cancel what is running, close
+         Cursor, stop the scheduler, flush SQLite, delete temporary audio. -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <!-- Long transcriptions must not be suspended by App Nap. -->
+    <key>LowPriorityIO</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/me/Library/Logs/agent-core.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/me/Library/Logs/agent-core.log</string>
+</dict>
+</plist>

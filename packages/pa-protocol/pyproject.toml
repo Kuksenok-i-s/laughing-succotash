@@ -1,0 +1,13 @@
+[project]
+name = "pa-protocol"
+version = "1.0.0"
+description = "Shared JSON-RPC/WebSocket wire protocol for the personal assistant"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pa_protocol"]

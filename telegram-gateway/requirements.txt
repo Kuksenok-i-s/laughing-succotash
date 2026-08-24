@@ -1,0 +1,10 @@
+# Telegram Gateway runtime dependencies (Linux VPS).
+#
+# The shared wire protocol lives in this repository and is installed from a path:
+#   pip install -e ../packages/pa-protocol
+
+aiogram>=3.7
+aiohttp>=3.9
+aiofiles>=23.2
+pydantic>=2.7
+pydantic-settings>=2.2

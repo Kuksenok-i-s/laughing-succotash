@@ -1,0 +1,23 @@
+# Filesystem and project allowlists for the Agent Core.
+#
+# Copy to DATA_DIR/assistant.toml (or point CONFIG_FILE at it). Nothing outside these lists is
+# reachable: $HOME as a whole is never indexed, and a project that is not named here cannot be
+# opened even if the user asks for it by absolute path.
+
+# Directories the assistant may read for documents and notes.
+files = [
+    "/Users/me/Documents/Assistant",
+    "/Users/me/Notes",
+]
+
+# Software projects Cursor may open as a coding agent. `writable = false` means it may read and
+# reason about the project but not modify it.
+[projects.awgvpn]
+path = "/Users/me/projects/awgvpn"
+writable = true
+description = "AmneziaWG client and server configuration"
+
+[projects.infra]
+path = "/Users/me/projects/infra"
+writable = false
+description = "Production infrastructure — read-only on purpose"

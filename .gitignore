@@ -1,0 +1,26 @@
+# Secrets. The tokens in these files are the whole security boundary between Telegram, the Gateway
+# and the Mac mini; none of them belong in git.
+.env
+*.env
+!.env.example
+assistant.toml
+
+# Local state
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data/
+models/
+
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+.DS_Store

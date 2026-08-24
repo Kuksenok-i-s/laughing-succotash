@@ -1,0 +1,8 @@
+# Local transcription, installed only on the machine that actually runs Whisper.
+#
+# ffmpeg must also be present on PATH (brew install ffmpeg): faster-whisper decodes most containers
+# itself, but the Core probes duration with ffprobe before starting an expensive transcription.
+#
+# The large-v3 weights (~3 GB) are downloaded on first use into DATA_DIR/models.
+
+faster-whisper>=1.0
