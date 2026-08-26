@@ -442,6 +442,7 @@ class AssistantService:
         if dest.resolve() != final.resolve():
             dest.rename(final)
             result.dest = final
+            result.files = [final / path.name for path in result.files]
 
         title = telegram_title(result.title)
         kind_ru = {"video": "ролик", "playlist": "плейлист", "channel": "канал"}[link.kind]

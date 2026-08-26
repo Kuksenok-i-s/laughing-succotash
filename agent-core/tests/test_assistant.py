@@ -430,11 +430,12 @@ class FakeYoutube:
         return YoutubeAudioBatch(dest=dest_dir, items=items, title=self.title, kind=kind)
 
     async def fetch_video(self, url, dest_dir, *, job_id, kind="video"):
+        from agent_core.youtube.documents import readable_stem
         from agent_core.youtube.download import YoutubeLibrary
 
         self.video_calls.append((url, kind))
         dest_dir.mkdir(parents=True, exist_ok=True)
-        video = dest_dir / "clip.mp4"
+        video = dest_dir / f"{readable_stem(self.title)}.mp4"
         video.write_bytes(b"fake-video")
         return YoutubeLibrary(dest=dest_dir, files=[video], title=self.title, kind=kind)
 
@@ -528,6 +529,10 @@ async def test_a_download_phrase_archives_the_video(build, gateway, tmp_path) ->
         method for method, _ in gateway.delivered if method == "telegram.send_document"
     ] == []
     assert any("Сохранил на диск" in text for text in gateway.texts())
+    saved = list((tmp_path / "videos").rglob("*.mp4"))
+    assert len(saved) == 1
+    assert saved[0].name == "Me at the zoo.mp4"
+    assert saved[0].parent.name == "Me at the zoo"
 
 
 async def test_a_playlist_url_downloads_video_files(build, gateway, tmp_path) -> None:

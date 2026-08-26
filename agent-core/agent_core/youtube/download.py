@@ -14,22 +14,44 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import posixpath
+import re
 import shlex
 import subprocess
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .documents import readable_media_filename, unique_file
 from .urls import YoutubeKind
 
 log = logging.getLogger(__name__)
 
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
 _AUDIO_SUFFIXES = {".mp3", ".m4a", ".opus", ".ogg", ".wav", ".webm"}
+_YTDLP_ID_SUFFIX = re.compile(r" \[[\w-]{11}\]$")
+# Netscape cookies for yt-dlp. Lives on the proxy, never under /tmp.
+_DEFAULT_REMOTE_COOKIES = "/var/lib/telegram-gateway/youtube/cookies.txt"
 
 
 class YoutubeError(RuntimeError):
     """Download or probe failed. The job fails; the Core stays up."""
+
+
+def _title_from_ytdlp_stem(stem: str) -> str:
+    return _YTDLP_ID_SUFFIX.sub("", stem)
+
+
+def _rename_library_video(
+    video: Path, title: str, *, index: int | None = None
+) -> Path:
+    dest_name = readable_media_filename(
+        _title_from_ytdlp_stem(title), video.suffix, index=index
+    )
+    target = unique_file(video.parent, dest_name, ignore=video)
+    if video.resolve() != target.resolve():
+        video.rename(target)
+    return target
 
 
 @dataclass(slots=True)
@@ -76,8 +98,12 @@ class YoutubeDownloader:
         transcripts_dir: Path | None = None,
         videos_dir: Path | None = None,
         max_videos: int = 40,
+        cookies: str | None = None,
+        local_cookies: Path | None = None,
     ) -> None:
         _refuse_tmp(remote_dir)
+        if cookies:
+            _refuse_tmp(cookies)
         self._remote = remote
         self._remote_dir = remote_dir.rstrip("/")
         self._ssh_key = ssh_key.expanduser()
@@ -86,10 +112,18 @@ class YoutubeDownloader:
         self.transcripts_dir = transcripts_dir
         self.videos_dir = videos_dir
         self.max_videos = max(1, max_videos)
+        self._cookies = cookies
+        self._local_cookies = local_cookies.expanduser() if local_cookies else None
 
     @classmethod
     def from_settings(cls, settings) -> YoutubeDownloader | None:
-        path = settings.resolved_youtube_config
+        path = getattr(settings, "resolved_youtube_config", None)
+        if path is None:
+            configured = getattr(settings, "youtube_config", None)
+            if configured is not None:
+                path = Path(configured).expanduser().resolve()
+            else:
+                path = settings.resolved_data_dir / "youtube" / "config.toml"
         if not path.exists():
             log.info("no youtube config at %s; YouTube URLs will be refused", path)
             return None
@@ -105,6 +139,15 @@ class YoutubeDownloader:
             log.warning("youtube config has download.remote but no paths.ssh_key")
             return None
         base = Path(paths.get("base") or (settings.resolved_data_dir / "youtube"))
+        local_raw = paths.get("cookies")
+        local_cookies = Path(str(local_raw)).expanduser() if local_raw else None
+        if local_cookies is None:
+            candidate = path.parent / "cookies.txt"
+            if candidate.is_file():
+                local_cookies = candidate
+        remote_cookies = str(download.get("cookies") or "") or None
+        if remote_cookies is None and local_cookies is not None:
+            remote_cookies = _DEFAULT_REMOTE_COOKIES
         return cls(
             remote=str(remote),
             remote_dir=str(download.get("remote_dir") or "/root/ytdl"),
@@ -115,6 +158,8 @@ class YoutubeDownloader:
             video_format=str(
                 download.get("format") or "bv*[height<=1080]+ba/b[height<=1080]/b"
             ),
+            cookies=remote_cookies,
+            local_cookies=local_cookies,
         )
 
     def _ssh(self) -> list[str]:
@@ -154,6 +199,41 @@ class YoutubeDownloader:
             err = (extract.stderr or b"tar extract failed").decode("utf-8", "replace")
             raise YoutubeError(err.strip()[:500])
 
+    def _cookie_args(self) -> str:
+        if not self._cookies:
+            return ""
+        return f"--cookies {shlex.quote(self._cookies)} "
+
+    def _sync_cookies(self) -> None:
+        """Copy a local Netscape cookies.txt onto the proxy for yt-dlp.
+
+        The file is streamed over SSH stdin so nothing lands in ``/tmp``.
+        """
+        if self._local_cookies is None:
+            return
+        if not self._local_cookies.is_file():
+            raise YoutubeError(f"youtube cookies file not found: {self._local_cookies}")
+        if not self._cookies:
+            raise YoutubeError("youtube cookies are set locally but have no remote path")
+        _refuse_tmp(self._cookies)
+        parent = posixpath.dirname(self._cookies.rstrip("/")) or "/"
+        quoted_parent = shlex.quote(parent)
+        quoted_remote = shlex.quote(self._cookies)
+        blob = self._local_cookies.read_bytes()
+        proc = subprocess.run(
+            [
+                *self._ssh(),
+                f"install -d -m 700 {quoted_parent} && cat > {quoted_remote} && chmod 600 {quoted_remote}",
+            ],
+            input=blob,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or b"cookie upload failed").decode(
+                "utf-8", "replace"
+            )
+            raise YoutubeError(err.strip()[:500])
+
     def _run_remote(
         self,
         remote_cmd: str,
@@ -163,6 +243,7 @@ class YoutubeDownloader:
         ok_codes: tuple[int, ...] = (0,),
     ) -> None:
         _refuse_tmp(self._remote_dir)
+        self._sync_cookies()
         remote_job = f"{self._remote_dir}/{job_id}"
         quoted_job = shlex.quote(remote_job)
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -198,9 +279,7 @@ class YoutubeDownloader:
         dest_dir.mkdir(parents=True, exist_ok=True)
         return await asyncio.to_thread(self._fetch_audio_batch, url, dest_dir, job_id, kind)
 
-    def _fetch_audio_batch(
-        self, url: str, dest_dir: Path, job_id: str, kind: YoutubeKind
-    ) -> YoutubeAudioBatch:
+    def _audio_remote_cmd(self, url: str, job_id: str, kind: YoutubeKind) -> str:
         remote_job = f"{self._remote_dir}/{job_id}"
         quoted_job = shlex.quote(remote_job)
         quoted_url = shlex.quote(url)
@@ -211,13 +290,18 @@ class YoutubeDownloader:
         quoted_out = shlex.quote(f"{remote_job}/%(title)s [%(id)s].%(ext)s")
         # Audio only: the Core transcribes; video would only fill the proxy disk.
         # The yt-dlp template must be quoted: bash otherwise treats %(id)s as a subshell.
-        remote_cmd = (
+        return (
             f"mkdir -p {quoted_job} && "
-            f"yt-dlp {playlist_flag} {max_flag}{ignore_flag}"
+            f"yt-dlp {playlist_flag} {max_flag}{ignore_flag}{self._cookie_args()}"
             f"-f ba/bestaudio/best -x --audio-format {fmt} "
             f"--write-info-json --no-progress "
             f"-o {quoted_out} {quoted_url}"
         )
+
+    def _fetch_audio_batch(
+        self, url: str, dest_dir: Path, job_id: str, kind: YoutubeKind
+    ) -> YoutubeAudioBatch:
+        remote_cmd = self._audio_remote_cmd(url, job_id, kind)
         ok_codes = (0,) if kind == "video" else (0, 101)
         self._run_remote(remote_cmd, dest_dir, job_id, ok_codes=ok_codes)
         batch = self._parse_audio_dir(dest_dir, url, kind)
@@ -291,9 +375,7 @@ class YoutubeDownloader:
         dest_dir.mkdir(parents=True, exist_ok=True)
         return await asyncio.to_thread(self._fetch_video, url, dest_dir, job_id, kind)
 
-    def _fetch_video(
-        self, url: str, dest_dir: Path, job_id: str, kind: YoutubeKind
-    ) -> YoutubeLibrary:
+    def _video_remote_cmd(self, url: str, job_id: str, kind: YoutubeKind) -> str:
         remote_job = f"{self._remote_dir}/{job_id}"
         quoted_job = shlex.quote(remote_job)
         quoted_url = shlex.quote(url)
@@ -301,35 +383,77 @@ class YoutubeDownloader:
         max_flag = "" if kind == "video" else f"--max-downloads {self.max_videos} "
         quoted_fmt = shlex.quote(self._video_format)
         quoted_out = shlex.quote(f"{remote_job}/%(title)s [%(id)s].%(ext)s")
-        remote_cmd = (
+        return (
             f"mkdir -p {quoted_job} && "
-            f"yt-dlp {playlist_flag} {max_flag}"
+            f"yt-dlp {playlist_flag} {max_flag}{self._cookie_args()}"
             f"-f {quoted_fmt} "
             f"--merge-output-format mp4 --write-info-json --no-progress --ignore-errors "
             f"-o {quoted_out} {quoted_url}"
         )
+
+    def _fetch_video(
+        self, url: str, dest_dir: Path, job_id: str, kind: YoutubeKind
+    ) -> YoutubeLibrary:
+        remote_cmd = self._video_remote_cmd(url, job_id, kind)
         # yt-dlp exits 101 when --max-downloads is reached; that is the cap working, not a failure.
         self._run_remote(remote_cmd, dest_dir, job_id, ok_codes=(0, 101))
-
-        files = sorted(
-            path
-            for path in dest_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in _VIDEO_SUFFIXES
+        library = self._parse_video_dir(dest_dir, kind)
+        log.info(
+            "downloaded %d youtube video(s) (%s) -> %s",
+            len(library.files),
+            library.title,
+            dest_dir,
         )
-        if not files:
-            raise YoutubeError("yt-dlp produced no video file")
+        return library
 
-        title = dest_dir.name
-        info_path = next(dest_dir.rglob("*.info.json"), None)
-        if info_path is not None:
+    def _parse_video_dir(self, dest_dir: Path, kind: YoutubeKind) -> YoutubeLibrary:
+        numbered = kind != "video"
+        files: list[tuple[int | None, Path]] = []
+        collection = dest_dir.name
+        for info_path in sorted(dest_dir.rglob("*.info.json")):
             info = json.loads(info_path.read_text(encoding="utf-8"))
-            title = str(
+            stem = info_path.name[: -len(".info.json")]
+            video = next(
+                (
+                    path
+                    for path in info_path.parent.iterdir()
+                    if path.is_file()
+                    and path.suffix.lower() in _VIDEO_SUFFIXES
+                    and path.stem == stem
+                ),
+                None,
+            )
+            if video is None:
+                continue
+            title = str(info.get("title") or stem)
+            raw_index = info.get("playlist_index") or info.get("playlist_autonumber")
+            index = int(raw_index) if raw_index is not None else None
+            collection = str(
                 info.get("playlist_title")
                 or info.get("uploader")
                 or info.get("channel")
                 or info.get("title")
-                or title
+                or collection
             )
+            renamed = _rename_library_video(
+                video, title, index=index if numbered else None
+            )
+            files.append((index, renamed))
+            info_path.unlink(missing_ok=True)
 
-        log.info("downloaded %d youtube video(s) (%s) -> %s", len(files), title, dest_dir)
-        return YoutubeLibrary(dest=dest_dir, files=files, title=title, kind=kind)
+        if not files:
+            leftovers = sorted(
+                path
+                for path in dest_dir.rglob("*")
+                if path.is_file() and path.suffix.lower() in _VIDEO_SUFFIXES
+            )
+            for offset, video in enumerate(leftovers, start=1):
+                index = offset if numbered else None
+                files.append((index, _rename_library_video(video, video.stem, index=index)))
+
+        if not files:
+            raise YoutubeError("yt-dlp produced no video file")
+        files.sort(key=lambda item: (item[0] is None, item[0] or 0, item[1].name))
+        return YoutubeLibrary(
+            dest=dest_dir, files=[path for _, path in files], title=collection, kind=kind
+        )

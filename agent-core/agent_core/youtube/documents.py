@@ -42,6 +42,21 @@ def readable_filename(title: str, suffix: str, *, max_stem: int = 80) -> str:
     return f"{readable_stem(title, max_stem=max_stem)} — {suffix}.md"
 
 
+def readable_media_filename(
+    title: str,
+    suffix: str,
+    *,
+    index: int | None = None,
+    max_stem: int = 80,
+) -> str:
+    """Directory-safe video filename: the title, no YouTube id, optional playlist order."""
+    ext = suffix if suffix.startswith(".") else f".{suffix}"
+    stem = readable_stem(title, max_stem=max_stem)
+    if index is not None:
+        stem = f"{index:02d} - {stem}"
+    return f"{stem}{ext}"
+
+
 def unique_dir(root: Path, stem: str) -> Path:
     candidate = root / stem
     index = 2
@@ -49,6 +64,28 @@ def unique_dir(root: Path, stem: str) -> Path:
         candidate = root / f"{stem} ({index})"
         index += 1
     return candidate
+
+
+def unique_file(directory: Path, filename: str, *, ignore: Path | None = None) -> Path:
+    """Pick a free path in ``directory``. ``ignore`` is the file we are about to rename."""
+    ignore_key = ignore.resolve() if ignore is not None else None
+
+    def taken(path: Path) -> bool:
+        if not path.exists():
+            return False
+        return ignore_key is None or path.resolve() != ignore_key
+
+    candidate = directory / filename
+    if not taken(candidate):
+        return candidate
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    index = 2
+    while True:
+        candidate = directory / f"{stem} ({index}){suffix}"
+        if not taken(candidate):
+            return candidate
+        index += 1
 
 
 def format_duration(seconds: float | None) -> str | None:

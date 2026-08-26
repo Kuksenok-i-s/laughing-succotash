@@ -4,6 +4,7 @@
 *.env
 !.env.example
 assistant.toml
+cookies.txt
 
 # Local state
 *.sqlite3
