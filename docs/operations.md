@@ -6,15 +6,17 @@ Installing, running and repairing the parts of the system.
 
 | Machine | Needs |
 | --- | --- |
-| Gateway (Linux) | Python 3.12+, a domain with a TLS certificate, a Telegram bot token |
-| Core (Intel Mac mini) | Python 3.12+, `ffmpeg`, `cursor-agent` logged in, ~4 GB free for model weights |
-| GPU host (optional, Linux) | An NVIDIA GPU, `ffmpeg`, a virtualenv with `faster-whisper`, ~4 GB for weights |
+| Gateway (Linux VPS `45.148.60.90`) | Python 3.12+, Telegram bot token; RPC on port 17492 |
+| Core + GPU (`10.0.7.49`) | Python 3.13+, `ffmpeg`, `cursor-agent` logged in, NVIDIA GPU, Ollama |
+| Mac mini (`10.0.7.46`) | Former Core host; launch agent disabled after the 2026-08-28 move |
 
 The Gateway must be reachable from the Core; the Core needs no inbound access at all. That
 asymmetry is deliberate — see [ADR 0002](adr/0002-jsonrpc-over-websocket.md).
 
-The GPU host is only needed for `STT_BACKEND=gpu`, and only has to be reachable from the Core over
-the LAN. Without it the Core transcribes on its own CPU, which works and is merely slow.
+Durable Core state lives on this GPU host at `/home/ilya/bulk/assistant` (`~/bulk` →
+`/mnt/generic_storage`). Whisper and handwriting OCR are loopback/LAN services on the same
+machine (`:17493` / `:17494`). YouTube still downloads through the VPS: one file at a time, then
+the file is pulled onto `/home/ilya/bulk/assistant/youtube`.
 
 ## Shared secret
 
@@ -157,11 +159,43 @@ Verify from the Mini, which is the only client that matters:
 curl -sf http://<gpu-host>:17493/health
 ```
 
-`model_loaded: false` right after a start is correct: on an RTX 4080 the weights took 85 seconds
-from cold disk and 2 seconds on an immediate restart. Jobs queue meanwhile rather than fail.
-Then set `STT_BACKEND=gpu`, `STT_GPU_URL` and `STT_GPU_TOKEN` in the Core's `.env` and restart it.
+`model_loaded: false` right after a start, or after ten minutes of quiet, is correct: Whisper
+drops `large-v3` (and OCR drops Qwen3-VL) so the two can share one card. The next job reloads
+the weights; `/health` still answers and jobs queue rather than fail. Then set `STT_BACKEND=gpu`,
+`STT_GPU_URL` and `STT_GPU_TOKEN` in the Core's `.env` and restart it.
 The Core logs `transcription service ready at ...` at startup; a `transcription service unreachable`
 there means the token, the address or the firewall.
+
+## Handwriting OCR (`handwriting-ocr`)
+
+Optional fourth unit on the GPU host `10.0.7.49` (Whisper / Ollama). Agent Core runs on
+`10.0.7.46` and reaches this service over the LAN. Ollama must already serve `qwen3-vl` on
+localhost of the GPU host; only the OCR job API is published on the LAN.
+
+```bash
+# on GPU host 10.0.7.49
+git clone <repo> ~/handwriting-ocr/src
+ollama pull qwen3-vl
+
+install -d -m 700 ~/.config/handwriting-ocr ~/.handwriting-ocr/tmp
+install -m 600 ~/handwriting-ocr/src/handwriting-ocr/service.env.example \
+        ~/.config/handwriting-ocr/service.env
+"${EDITOR:-vi}" ~/.config/handwriting-ocr/service.env   # set OCR_TOKEN
+
+cp ~/handwriting-ocr/src/deploy/systemd/handwriting-ocr.service ~/.config/systemd/user/
+# Adjust PYTHONPATH / WorkingDirectory in the unit if the checkout path differs.
+systemctl --user daemon-reload
+systemctl --user enable --now handwriting-ocr
+
+# from Core host 10.0.7.46
+curl -sf http://10.0.7.49:17494/health
+```
+
+Then on Core (`10.0.7.46`) set `OCR_ENABLED=true`, `OCR_SERVICE_URL=http://10.0.7.49:17494` and
+`OCR_SERVICE_TOKEN` (same value as `OCR_TOKEN`) in `.env` and restart. There is no local OCR
+fallback: if the service is down, the photo job fails with `ocr_unavailable`. After ten minutes
+without a job both GPU services unload on their own (`GPU_STT_IDLE_UNLOAD_SECONDS` /
+`OCR_IDLE_UNLOAD_SECONDS`, default 600). `POST /v1/model/unload` still forces OCR off immediately.
 
 ## First run checklist
 
@@ -190,6 +224,9 @@ launchctl kickstart -k gui/$(id -u)/com.assistant.agent-core
 # GPU host, if used
 cd ~/gpu-transcriber/src && git pull
 systemctl --user restart gpu-transcriber
+
+cd ~/handwriting-ocr/src && git pull
+systemctl --user restart handwriting-ocr
 ```
 
 Restarting the transcription service loses a job in flight; the Core notices, says so in Telegram
@@ -244,11 +281,11 @@ lost one.
 
 | Data | Machine | Lost if the disk dies |
 | --- | --- | --- |
-| Reminders, tasks, notes, memory, contacts, calendar, sessions | Core | Everything the assistant knows |
+| Reminders, tasks, notes, memory, contacts, calendar, sessions, YouTube library | Core (`/home/ilya/bulk/assistant` on `10.0.7.49`) | Everything the assistant knows |
 | Pending requests, pending uploads, delivery state, callback tokens | Gateway | A few in-flight messages |
-| Audio being transcribed, and nothing else | GPU host | The job that was running |
+| Audio being transcribed, OCR spool | GPU host (same machine as Core) | The job that was running |
 
-Back up `~/.personal-assistant/core.sqlite3`. The Gateway's database is not worth backing up, which
+Back up `/home/ilya/bulk/assistant/core.sqlite3`. The Gateway's database is not worth backing up, which
 is the point of keeping it purely transport state.
 
 Audio is never kept. The Gateway deletes its copy once the Core acknowledges the upload, the Core

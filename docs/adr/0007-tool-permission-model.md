@@ -19,7 +19,8 @@ Cursor's built-in file writes or shell commands.
 - `READ` — executed automatically. `calendar_list`, `calendar_find_free_slots`, `task_list`,
   `note_search`, `memory_search`, `contact_search`, `system_status`, `web_search`.
 - `SAFE_WRITE` — executed without asking **only when it originates from a direct user
-  instruction**. `reminder_create`, `task_create`, `note_create`, `calendar_create`.
+  instruction**. `reminder_create`, `task_create`, `note_create`, `calendar_create`,
+  `contact_create`.
 - `DANGEROUS` — always confirmed. `calendar_delete`, `task_delete`, `note_delete`,
   `memory_forget`, and any destructive filesystem operation.
 

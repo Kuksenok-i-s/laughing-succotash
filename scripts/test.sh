@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV="${ROOT}/scripts/dev.sh"
 
 status=0
-for target in "packages/pa-protocol/tests" "agent-core" "telegram-gateway" "gpu-transcriber" "tests"; do
+for target in "packages/pa-protocol/tests" "agent-core" "telegram-gateway" "gpu-transcriber" "handwriting-ocr" "tests"; do
     echo
     echo "=== ${target} ==="
     "${DEV}" -m pytest "${ROOT}/${target}" "$@" || status=$?

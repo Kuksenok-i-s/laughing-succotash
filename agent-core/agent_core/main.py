@@ -20,6 +20,7 @@ from .assistant.transcript import TranscriptAnalyzer
 from .audio.storage import UploadManager
 from .calendar.local import LocalCalendarProvider
 from .config import Settings, get_settings
+from .journal import JournalService
 from .jobs.manager import JobManager
 from .logging_setup import configure_logging
 from .mcp.server import ContextRegistry, McpServer, ToolRegistry
@@ -37,11 +38,13 @@ log = logging.getLogger(__name__)
 CAPABILITIES = [
     "assistant",
     "audio",
+    "image",
     "reminders",
     "calendar",
     "tasks",
     "notes",
     "memory",
+    "journal",
     "contacts",
     "timers",
     "youtube",
@@ -59,7 +62,9 @@ class Core:
         self._mcp: McpServer | None = None
         self._backend = None
         self._stt = None
+        self._ocr = None
         self._scheduler: Scheduler | None = None
+        self._journal: JournalService | None = None
         self._jobs = JobManager()
         self._uploads: UploadManager | None = None
         self._confirmations: ConfirmationService | None = None
@@ -101,12 +106,13 @@ class Core:
         self._uploads = UploadManager(
             repos.uploads,
             self._settings.resolved_temp_dir,
-            max_bytes=self._settings.max_audio_bytes,
+            max_bytes=max(self._settings.max_audio_bytes, self._settings.max_image_bytes),
             idle_timeout=self._settings.upload_idle_timeout,
         )
 
         self._backend = self._build_backend()
         self._stt = self._build_stt()
+        self._ocr = self._build_ocr()
 
         sessions = SessionManager(
             repos.conversations,
@@ -132,6 +138,8 @@ class Core:
             ),
             youtube=YoutubeDownloader.from_settings(self._settings),
             confirmations=self._confirmations,
+            journal=None,
+            ocr=self._ocr,
         )
 
         self._scheduler = Scheduler(
@@ -152,6 +160,23 @@ class Core:
         self._confirmations.register_handler(FollowupService.TOOL, followup.handle)
         self._scheduler.followup = followup
 
+        journal = JournalService(
+            repos,
+            self._confirmations,
+            link,
+            default_timezone=self._settings.default_timezone,
+            hour=self._settings.journal_hour,
+            minute=self._settings.journal_minute,
+            summary_hour=self._settings.journal_summary_hour,
+            enabled=self._settings.journal_enabled,
+            backend=self._backend,
+            workspace=self._settings.resolved_assistant_workspace,
+        )
+        self._confirmations.register_handler(JournalService.TOOL, journal.handle)
+        self._scheduler.journal = journal
+        assistant.journal = journal
+        self._journal = journal
+
         register_tools(
             registry,
             repos,
@@ -165,7 +190,13 @@ class Core:
         log.info("mcp tools registered: %s", ", ".join(registry.names()))
 
         handlers = CoreHandlers(
-            self._settings, repos, assistant, self._uploads, self._confirmations, self._scheduler
+            self._settings,
+            repos,
+            assistant,
+            self._uploads,
+            self._confirmations,
+            self._scheduler,
+            ocr=self._ocr,
         )
         link.register_all(handlers.as_map())
         link.on_binary = handlers.on_binary
@@ -177,6 +208,11 @@ class Core:
                 await self._stt.warmup()
             except Exception as exc:
                 log.error("speech-to-text warmup failed: %s", exc)
+        if self._ocr is not None:
+            try:
+                await self._ocr.warmup()
+            except Exception as exc:
+                log.error("handwriting OCR warmup failed: %s", exc)
         await self._scheduler.start()
         await link.start()
 
@@ -238,6 +274,20 @@ class Core:
 
         return FallbackSTT(primary=gpu, fallback=self._local_stt())
 
+    def _build_ocr(self):
+        if not self._settings.ocr_enabled:
+            return None
+        from .ocr.remote_service import RemoteOcrService
+
+        return RemoteOcrService(
+            base_url=self._settings.ocr_service_url,
+            token=self._settings.ocr_service_token,
+            poll_interval=self._settings.ocr_poll_interval,
+            request_timeout=self._settings.ocr_request_timeout,
+            upload_timeout=self._settings.ocr_upload_timeout,
+            stall_timeout=self._settings.ocr_stall_timeout,
+        )
+
     async def _start_backend(self) -> None:
         """Start Cursor eagerly, but do not die if it is not there.
 
@@ -266,6 +316,9 @@ class Core:
         if self._scheduler is not None:
             await self._scheduler.stop()
 
+        if self._journal is not None:
+            await self._journal.close()
+
         # Give running jobs a chance to deliver their replies while the link is still up.
         await self._jobs.drain(timeout=15.0)
 
@@ -279,6 +332,10 @@ class Core:
         if self._stt is not None:
             with contextlib.suppress(Exception):
                 await self._stt.close()
+
+        if self._ocr is not None:
+            with contextlib.suppress(Exception):
+                await self._ocr.close()
 
         if self._uploads is not None:
             await self._uploads.shutdown()

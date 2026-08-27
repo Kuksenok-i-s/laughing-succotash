@@ -7,6 +7,7 @@ result comes back later as a ``telegram.send``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from pathlib import Path
@@ -20,6 +21,7 @@ from pa_protocol import RpcError, methods, new_ulid
 from ..storage.models import GatewayStore
 from .formatting import confirmation_expired_notice, describe_error
 from .keyboard import BUTTON_COMMANDS, HIDE, hide_keyboard, main_keyboard
+from .origin import attribution_of
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +34,10 @@ HELP_TEXT = """Персональный ассистент.
 /cancel — отменить текущую задачу
 /status — состояние системы
 /transcribe — ответом на голосовое: только расшифровка, без обработки
+/ocr — ответом на фото: распознать рукописный текст ещё раз
 /reminders — список напоминаний
 /tasks — список задач
+/journal — дневник за сегодня (или начать опрос)
 /keyboard — показать кнопки
 /help — эта справка
 
@@ -41,6 +45,10 @@ HELP_TEXT = """Персональный ассистент.
 
 Длинную запись встречи можно прислать файлом: я расшифрую её и разберу
 на решения, задачи и сроки.
+
+Фотографию можно прислать как есть: если на ней текст — распознаю и предложу
+задачи; если нет — коротко опишу, что на снимке. Несколько фото одним альбомом
+обрабатываются вместе, как одна смысловая пачка.
 
 Ссылку на YouTube:
 • видео, плейлист или канал — кнопками «Конспект» или «Скачать видео»;
@@ -50,10 +58,14 @@ HELP_TEXT = """Персональный ассистент.
 
 # Telegram gives voice notes no filename; a sensible default keeps ffmpeg's format sniffing happy.
 _DEFAULT_AUDIO_NAME = "voice.ogg"
+_DEFAULT_IMAGE_NAME = "photo.jpg"
+_ALBUM_DEBOUNCE_SECONDS = 1.5
 
 
 def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> Router:
     router = Router(name="assistant")
+    album_buffers: dict[str, list[Message]] = {}
+    album_timers: dict[str, asyncio.Task] = {}
 
     def authorized(user_id: int | None) -> bool:
         """Advisory gate only.
@@ -69,6 +81,7 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
         message: Message, *, kind: str, text: str | None = None, command: str | None = None,
     ) -> str:
         request_id = new_ulid()
+        sender, source = attribution_of(message)
         payload = methods.dump(
             methods.AssistantSubmitParams(
                 request_id=request_id,
@@ -79,6 +92,8 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
                 text=text,
                 command=command,
                 client_time=message.date,
+                sender=sender,
+                source=source,
             )
         )
         await store.save_request(
@@ -171,6 +186,12 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
             return
         await enqueue(message, kind="command", command="/tasks")
 
+    @router.message(Command("journal"))
+    async def on_journal(message: Message) -> None:
+        if not authorized(message.from_user.id):
+            return
+        await enqueue(message, kind="command", command="/journal")
+
     @router.message(Command("transcribe"))
     async def on_transcribe(message: Message) -> None:
         """Transcription only: no conversation, no tools.
@@ -187,11 +208,25 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
             return
         await _accept_audio(target, purpose="transcribe_only", trigger=message)
 
+    @router.message(Command("ocr"))
+    async def on_ocr(message: Message) -> None:
+        """Re-run handwriting OCR on a replied photo or image document."""
+        if not authorized(message.from_user.id):
+            return
+        target = message.reply_to_message
+        if target is None or _image_of(target) is None:
+            await message.answer(
+                "Ответьте командой /ocr на фотографию или изображение-файл."
+            )
+            return
+        await _accept_image(target, trigger=message)
+
     _COMMANDS = {
         "new": on_new,
         "cancel": on_cancel,
         "reminders": on_reminders,
         "tasks": on_tasks,
+        "journal": on_journal,
         "status": on_status,
         "help": on_help,
     }
@@ -227,9 +262,55 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
     async def on_audio(message: Message) -> None:
         if not authorized(message.from_user.id):
             return
+        if _image_of(message) is not None:
+            await _accept_image(message, trigger=message)
+            return
         if _audio_of(message) is None:
             return
         await _accept_audio(message, purpose="assistant", trigger=message)
+
+    @router.message(F.photo)
+    async def on_photo(message: Message) -> None:
+        if not authorized(message.from_user.id):
+            return
+        if message.media_group_id:
+            await _buffer_album_photo(message)
+            return
+        await _accept_image(message, trigger=message)
+
+    async def _buffer_album_photo(message: Message) -> None:
+        group_id = message.media_group_id
+        assert group_id is not None
+        album_buffers.setdefault(group_id, []).append(message)
+        previous = album_timers.get(group_id)
+        if previous is not None and not previous.done():
+            previous.cancel()
+
+        async def flush_later() -> None:
+            try:
+                await asyncio.sleep(_ALBUM_DEBOUNCE_SECONDS)
+            except asyncio.CancelledError:
+                return
+            batch = album_buffers.pop(group_id, [])
+            album_timers.pop(group_id, None)
+            if not batch:
+                return
+            await _accept_album(batch)
+
+        album_timers[group_id] = asyncio.create_task(flush_later())
+
+    async def _accept_album(messages: list[Message]) -> None:
+        ordered = sorted(messages, key=lambda item: item.message_id)
+        album_id = new_ulid()
+        part_count = len(ordered)
+        for index, message in enumerate(ordered):
+            await _accept_image(
+                message,
+                trigger=message,
+                album_id=album_id,
+                part_index=index,
+                part_count=part_count,
+            )
 
     async def _accept_audio(message: Message, *, purpose: str, trigger: Message) -> None:
         media = _audio_of(message)
@@ -257,6 +338,7 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
 
         digest = await _sha256(target)
         actual_size = target.stat().st_size
+        sender, source = attribution_of(message)
 
         await store.save_upload(
             request_id=request_id,
@@ -270,6 +352,7 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
             sha256=digest,
             duration_seconds=float(getattr(media, "duration", 0) or 0) or None,
             purpose=purpose,
+            attribution={"sender": methods.dump(sender), "source": methods.dump(source)},
         )
         # The submit references the upload; the Core starts work at audio.commit.
         await store.save_request(
@@ -279,6 +362,78 @@ def build_router(bot: Bot, store: GatewayStore, core, submissions, settings) -> 
             message_id=message.message_id,
             kind="audio",
             payload={},
+        )
+        await store.mark_request_submitted(request_id, None)
+        submissions.nudge()
+
+    async def _accept_image(
+        message: Message,
+        *,
+        trigger: Message,
+        album_id: str | None = None,
+        part_index: int | None = None,
+        part_count: int | None = None,
+    ) -> None:
+        media = _image_of(message)
+        if media is None:
+            return
+
+        size = getattr(media, "file_size", 0) or 0
+        if size > settings.max_download_bytes:
+            await trigger.answer("Файл слишком большой.")
+            return
+
+        request_id = new_ulid()
+        filename = getattr(media, "file_name", None) or _DEFAULT_IMAGE_NAME
+        content_type = getattr(media, "mime_type", None) or "image/jpeg"
+        target = settings.resolved_temp_dir / f"{request_id}_{_safe_name(filename)}"
+        caption = (message.caption or "").strip() or None
+
+        try:
+            await trigger.bot.send_chat_action(message.chat.id, "typing")
+            file = await trigger.bot.get_file(media.file_id)
+            await trigger.bot.download_file(file.file_path, destination=target)
+        except Exception:
+            log.exception("failed to download image from telegram")
+            await trigger.answer("Не удалось скачать файл из Telegram.")
+            target.unlink(missing_ok=True)
+            return
+
+        digest = await _sha256(target)
+        actual_size = target.stat().st_size
+        sender, source = attribution_of(message)
+
+        await store.save_upload(
+            request_id=request_id,
+            user_id=f"tg:{message.from_user.id}",
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            file_path=target,
+            filename=filename,
+            content_type=content_type,
+            size=actual_size,
+            sha256=digest,
+            purpose="ocr",
+            caption=caption,
+            attribution={"sender": methods.dump(sender), "source": methods.dump(source)},
+            album_id=album_id,
+            part_index=part_index,
+            part_count=part_count,
+        )
+        payload: dict[str, Any] = {}
+        if caption:
+            payload["caption"] = caption
+        if album_id:
+            payload["album_id"] = album_id
+            payload["part_index"] = part_index
+            payload["part_count"] = part_count
+        await store.save_request(
+            request_id=request_id,
+            user_id=f"tg:{message.from_user.id}",
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            kind="image",
+            payload=payload,
         )
         await store.mark_request_submitted(request_id, None)
         submissions.nudge()
@@ -358,6 +513,18 @@ def _audio_of(message: Message) -> Any | None:
     return None
 
 
+def _image_of(message: Message) -> Any | None:
+    """Return the largest photo size or an image document, if any."""
+    if message.photo:
+        return message.photo[-1]
+    document = message.document
+    if document is not None:
+        mime = (document.mime_type or "").lower()
+        if mime.startswith("image/"):
+            return document
+    return None
+
+
 def _safe_name(filename: str) -> str:
     cleaned = "".join(c for c in filename if c.isalnum() or c in "._-")
     return cleaned[-80:] or "audio"
@@ -387,6 +554,7 @@ def _render_status(status: dict[str, Any], queued_locally: int) -> str:
         f"Core: connected ({core.get('instance_id', '?')})",
         f"Cursor: {cursor.get('state', '?')}",
         f"Whisper: {stt.get('state', '?')} ({stt.get('model', '?')})",
+        f"OCR: {status.get('ocr', {}).get('state', '?')} ({status.get('ocr', {}).get('model', '-')})",
         f"Scheduler: {scheduler.get('state', '?')}, напоминаний: {scheduler.get('pending_reminders', 0)}",
         f"Jobs: {jobs.get('running', 0)} running / {jobs.get('queued', 0)} queued",
     ]

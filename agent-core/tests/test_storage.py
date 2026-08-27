@@ -39,6 +39,19 @@ async def test_the_same_calendar_operation_twice_creates_one_event(repos) -> Non
     assert first["event_id"] == second["event_id"]
 
 
+async def test_the_same_contact_operation_twice_creates_one_contact(repos) -> None:
+    args = {
+        "user_id": "tg:1", "display_name": "Саша Иванов", "aliases": ["@sasha"],
+        "operation_id": "contact-op",
+    }
+    first, _ = await repos.contacts.create(**args)
+    second, duplicate = await repos.contacts.create(**args)
+
+    assert duplicate is True
+    assert first["contact_id"] == second["contact_id"]
+    assert len(await repos.contacts.search("tg:1", "саша")) == 1
+
+
 async def test_the_same_request_id_maps_to_one_job(repos) -> None:
     first, dup1 = await repos.jobs.create_or_get(
         request_id="req-1", user_id="tg:1", kind="text"
@@ -79,6 +92,37 @@ async def test_users_cannot_read_each_others_objects(repos) -> None:
     assert await repos.notes.search("tg:2", "личное") == []
     assert await repos.notes.delete(note["note_id"], "tg:2") is False
     assert await repos.notes.get(note["note_id"], "tg:1") is not None
+
+
+async def test_users_cannot_read_each_others_contacts(repos) -> None:
+    contact, _ = await repos.contacts.create(
+        user_id="tg:1", display_name="Саша", operation_id="c-1"
+    )
+
+    assert await repos.contacts.get(contact["contact_id"], "tg:2") is None
+    assert await repos.contacts.search("tg:2", "саша") == []
+    assert await repos.contacts.update(contact["contact_id"], "tg:2", note="чужой") is None
+    stored = await repos.contacts.get(contact["contact_id"], "tg:1")
+    assert stored is not None and stored["note"] is None
+
+
+async def test_users_cannot_read_each_others_journal(repos) -> None:
+    entry, _ = await repos.journal.ensure(user_id="tg:1", local_date="2026-08-27")
+    await repos.journal.update(
+        entry.entry_id, "tg:1", answers={"work": "секрет"}, complete=True,
+    )
+
+    assert await repos.journal.get(entry.entry_id, "tg:2") is None
+    assert await repos.journal.search("tg:2", "секрет") == []
+    assert await repos.journal.get_by_date("tg:2", "2026-08-27") is None
+
+
+async def test_one_journal_row_per_user_per_day(repos) -> None:
+    first, dup1 = await repos.journal.ensure(user_id="tg:1", local_date="2026-08-27")
+    second, dup2 = await repos.journal.ensure(user_id="tg:1", local_date="2026-08-27")
+
+    assert dup1 is False and dup2 is True
+    assert first.entry_id == second.entry_id
 
 
 async def test_a_new_conversation_archives_the_previous_one(repos) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 
 from helpers import Client, FakeEngine, wait_for
@@ -79,11 +80,60 @@ def test_a_model_that_will_not_load_leaves_the_service_up(store: JobStore) -> No
     """Without this the process would die and the Core would see a refused connection."""
     engine = FakeEngine(load_error=RuntimeError("no cuda device"))
     stop = threading.Event()
-
-    TranscriptionWorker(store, engine).run(stop)
+    worker = TranscriptionWorker(store, engine, poll_interval=0.01)
+    thread = threading.Thread(target=worker.run, args=(stop,), daemon=True)
+    thread.start()
+    try:
+        assert wait_for(lambda: engine.loads >= 1)
+    finally:
+        stop.set()
+        thread.join(timeout=5.0)
 
     assert engine.loads == 1
     assert not engine.ready
+
+
+def test_idle_unload_drops_weights_and_the_next_job_reloads(
+    store: JobStore, engine: FakeEngine
+) -> None:
+    _queued(store, "01ONE")
+    worker = TranscriptionWorker(
+        store, engine, poll_interval=0.01, idle_unload_seconds=0.05
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.run, args=(stop,), daemon=True)
+    thread.start()
+    try:
+        assert wait_for(lambda: store.get("01ONE").status == "done")
+        assert wait_for(lambda: engine.unloads == 1)
+        assert not engine.ready
+        _queued(store, "01TWO")
+        assert wait_for(lambda: store.get("01TWO").status == "done")
+    finally:
+        stop.set()
+        thread.join(timeout=5.0)
+
+    assert engine.loads == 2
+    assert engine.unloads >= 1
+    assert len(engine.calls) == 2
+
+
+def test_idle_unload_can_be_disabled(store: JobStore, engine: FakeEngine) -> None:
+    _queued(store)
+    worker = TranscriptionWorker(
+        store, engine, poll_interval=0.01, idle_unload_seconds=0
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.run, args=(stop,), daemon=True)
+    thread.start()
+    try:
+        assert wait_for(lambda: store.get("01JOB").status == "done")
+        time.sleep(0.08)
+        assert engine.unloads == 0
+        assert engine.ready
+    finally:
+        stop.set()
+        thread.join(timeout=5.0)
 
 
 def test_a_job_deleted_while_queued_is_never_started(

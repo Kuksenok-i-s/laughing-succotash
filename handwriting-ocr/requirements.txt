@@ -1,0 +1,2 @@
+# Runtime: Pillow for grayscale + contrast before Ollama. HTTP surface stays stdlib.
+Pillow>=10

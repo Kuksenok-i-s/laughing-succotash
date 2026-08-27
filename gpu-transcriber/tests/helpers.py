@@ -48,6 +48,7 @@ class FakeEngine:
         self.resume = threading.Event()
         self.reached_pause = threading.Event()
         self.loads = 0
+        self.unloads = 0
         self.calls: list[dict[str, Any]] = []
         self._ready = False
 
@@ -65,7 +66,13 @@ class FakeEngine:
             raise self._load_error
         self._ready = True
 
+    def unload(self) -> None:
+        self.unloads += 1
+        self._ready = False
+
     def transcribe(self, audio_path, *, language, beam_size, on_progress=None):
+        if not self._ready:
+            self.load()
         self.calls.append(
             {
                 "audio": Path(audio_path),

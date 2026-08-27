@@ -49,9 +49,17 @@ class PendingUpload:
     purpose: str
     sha256: str | None
     attempts: int
+    caption: str | None = None
+    attribution: dict[str, Any] | None = None
+    album_id: str | None = None
+    part_index: int | None = None
+    part_count: int | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> PendingUpload:
+        keys = row.keys()
+        raw = row["attribution"] if "attribution" in keys else None
+        attribution = json.loads(raw) if raw else None
         return cls(
             request_id=row["request_id"],
             user_id=row["user_id"],
@@ -65,6 +73,11 @@ class PendingUpload:
             purpose=row["purpose"],
             sha256=row["sha256"],
             attempts=row["attempts"],
+            caption=row["caption"] if "caption" in keys else None,
+            attribution=attribution,
+            album_id=row["album_id"] if "album_id" in keys else None,
+            part_index=row["part_index"] if "part_index" in keys else None,
+            part_count=row["part_count"] if "part_count" in keys else None,
         )
 
 
@@ -121,15 +134,22 @@ class GatewayStore:
         self, *, request_id: str, user_id: str, chat_id: int, message_id: int,
         file_path: Path, filename: str, content_type: str | None, size: int,
         sha256: str, duration_seconds: float | None = None, purpose: str = "assistant",
+        caption: str | None = None, attribution: dict[str, Any] | None = None,
+        album_id: str | None = None, part_index: int | None = None,
+        part_count: int | None = None,
     ) -> None:
         now = utcnow().isoformat()
         await self._db.execute(
             "INSERT INTO pending_uploads(request_id, user_id, chat_id, message_id, file_path, "
-            "filename, content_type, size, duration_seconds, purpose, sha256, created_at, "
-            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "filename, content_type, size, duration_seconds, purpose, caption, attribution, "
+            "album_id, part_index, part_count, sha256, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(request_id) DO NOTHING",
             (request_id, user_id, chat_id, message_id, str(file_path), filename, content_type,
-             size, duration_seconds, purpose, sha256, now, now),
+             size, duration_seconds, purpose, caption,
+             json.dumps(attribution, ensure_ascii=False) if attribution else None,
+             album_id, part_index, part_count,
+             sha256, now, now),
         )
 
     async def pending_uploads(self, limit: int = 20) -> list[PendingUpload]:

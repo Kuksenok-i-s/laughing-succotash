@@ -28,6 +28,24 @@ class Provenance(str, Enum):
 
 
 @dataclass(slots=True)
+class MessageAttribution:
+    """Who originally produced this turn's content, as Telegram reported it."""
+
+    forwarded: bool
+    is_owner: bool
+    author_kind: str
+    author_name: str | None = None
+    author_username: str | None = None
+    author_telegram_user_id: str | None = None
+    author_chat_title: str | None = None
+
+    @property
+    def foreign(self) -> bool:
+        """True when the content was written by someone other than the user."""
+        return self.forwarded and not self.is_owner
+
+
+@dataclass(slots=True)
 class AgentContext:
     """Everything the agent needs that is not the message itself."""
 
@@ -40,6 +58,8 @@ class AgentContext:
     workspace: Path | None = None
     mode: str = "agent"
     metadata: dict[str, Any] = field(default_factory=dict)
+    owner_name: str | None = None
+    attribution: MessageAttribution | None = None
 
 
 @dataclass(slots=True)

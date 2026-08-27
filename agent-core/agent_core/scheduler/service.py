@@ -32,6 +32,7 @@ class Scheduler:
         confirmations=None,
         uploads=None,
         followup=None,
+        journal=None,
         default_timezone: str = "UTC",
     ) -> None:
         self._repos = repos
@@ -40,6 +41,7 @@ class Scheduler:
         self._confirmations = confirmations
         self._uploads = uploads
         self.followup = followup
+        self.journal = journal
         self._default_timezone = default_timezone
 
         self._task: asyncio.Task[None] | None = None
@@ -90,6 +92,8 @@ class Scheduler:
         moment = now or datetime.now(timezone.utc)
         await self._fire_reminders(moment)
         await self._fire_timers(moment)
+        if self.journal is not None:
+            await self.journal.tick(moment)
 
         if self._confirmations is not None:
             await self._confirmations.expire_overdue()

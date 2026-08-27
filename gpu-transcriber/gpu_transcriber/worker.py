@@ -2,8 +2,8 @@
 
 One job at a time: two large-v3 runs on one card are slower together than one after the other, and
 the memory spike risks the process. The model is loaded here rather than at startup so the HTTP
-surface answers immediately and ``/health`` can report the truth while the weights are still
-loading.
+surface answers immediately. After a stretch of idle time the weights are dropped so OCR can use
+the same card; the next job loads them again.
 """
 
 from __future__ import annotations
@@ -20,25 +20,36 @@ log = logging.getLogger(__name__)
 
 
 class TranscriptionWorker:
-    def __init__(self, store: JobStore, engine: Engine, *, poll_interval: float = 0.5) -> None:
+    def __init__(
+        self,
+        store: JobStore,
+        engine: Engine,
+        *,
+        poll_interval: float = 0.5,
+        idle_unload_seconds: float = 600.0,
+    ) -> None:
         self._store = store
         self._engine = engine
         self._poll = poll_interval
+        self._idle_unload = max(0.0, idle_unload_seconds)
+        self._last_used = time.monotonic()
 
     def run(self, stop: threading.Event) -> None:
         if not self._engine.ready:
             try:
                 self._engine.load()
+                self._last_used = time.monotonic()
             except Exception:
-                # Nothing can be transcribed without a model, but the service stays up so the Core
-                # gets a clear answer instead of a connection error.
-                log.exception("could not load the whisper model")
-                return
+                # Stay up: /health still answers, and the next job retries the load.
+                log.exception("could not preload the whisper model; will retry on the first job")
 
         while not stop.is_set():
             job = self._store.next_pending(self._poll)
             if job is not None:
                 self.run_job(job.job_id)
+                self._last_used = time.monotonic()
+                continue
+            self._maybe_unload()
 
     def run_job(self, job_id: str) -> None:
         job = self._store.get(job_id)
@@ -67,6 +78,19 @@ class TranscriptionWorker:
             len(result.get("segments", [])),
             result.get("language"),
         )
+
+    def _maybe_unload(self) -> None:
+        if self._idle_unload <= 0 or not self._engine.ready:
+            return
+        idle = time.monotonic() - self._last_used
+        if idle < self._idle_unload:
+            return
+        try:
+            self._engine.unload()
+        except Exception:
+            log.exception("idle unload failed")
+            return
+        log.info("unloaded whisper after %.0fs idle", idle)
 
     def _report(
         self,

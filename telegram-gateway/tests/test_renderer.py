@@ -163,7 +163,7 @@ async def test_progress_updates_edit_a_single_status_message(renderer, bot) -> N
     )
 
     assert bot.texts() == ["Расшифровываю запись…"]
-    assert bot.edits[-1][2].startswith("Расшифровка готова")
+    assert bot.edits[-1][2] == "Разбираю…"
 
 
 async def test_advancing_progress_edits_the_same_stage(renderer, bot) -> None:

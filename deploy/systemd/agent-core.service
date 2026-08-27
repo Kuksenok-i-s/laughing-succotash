@@ -1,0 +1,35 @@
+[Unit]
+Description=Agent Core (personal assistant)
+Documentation=https://github.com/yourname/personal-assistant/blob/main/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agent-core
+EnvironmentFile=%h/agent-core/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:%h/agent-core/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TMPDIR=%h/bulk/assistant/tmp
+Environment=TEMP=%h/bulk/assistant/tmp
+Environment=TMP=%h/bulk/assistant/tmp
+# Cursor AppImage leaks ARGV0 into the session; without this the venv python becomes the AppImage.
+UnsetEnvironment=ARGV0
+UnsetEnvironment=APPDIR
+UnsetEnvironment=APPIMAGE
+UnsetEnvironment=LD_LIBRARY_PATH
+UnsetEnvironment=OWD
+
+ExecStart=%h/agent-core/.venv/bin/python -m agent_core.main
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-core
+
+[Install]
+WantedBy=default.target

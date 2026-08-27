@@ -20,6 +20,7 @@ from .assistant import (
     TimerRepository,
 )
 from .conversations import Conversation, ConversationRepository, CursorSession, User
+from .journal import JournalEntry, JournalRepository, JournalSummary
 from .events import OutboundEvent, OutboundEventRepository
 from .jobs import Job, JobRepository, TranscriptionMetadataRepository, Upload, UploadRepository
 
@@ -31,6 +32,9 @@ __all__ = [
     "CursorSession",
     "Job",
     "JobRepository",
+    "JournalEntry",
+    "JournalRepository",
+    "JournalSummary",
     "MemoryRepository",
     "NoteRepository",
     "OperationLedger",
@@ -57,6 +61,7 @@ class Repositories:
     uploads: UploadRepository
     transcriptions: TranscriptionMetadataRepository
     events: OutboundEventRepository
+    journal: JournalRepository
     reminders: ReminderRepository
     timers: TimerRepository
     tasks: TaskRepository
@@ -75,6 +80,7 @@ class Repositories:
             uploads=UploadRepository(db),
             transcriptions=TranscriptionMetadataRepository(db),
             events=OutboundEventRepository(db),
+            journal=JournalRepository(db),
             reminders=ReminderRepository(db),
             timers=TimerRepository(db),
             tasks=TaskRepository(db),

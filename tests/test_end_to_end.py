@@ -171,19 +171,64 @@ class FakeSTT:
         pass
 
 
-class HarnessCore(Core):
-    """The real Core composition with only the two expensive local runtimes replaced."""
+class FakeOCR:
+    def __init__(self) -> None:
+        self.markdown: str | None = None
+        self.raw_text: str = ""
+        self.calls: list[Path] = []
+        self.ready = True
+        self.model_name = "fake-qwen3-vl"
 
-    def __init__(self, settings: CoreSettings, backend: FakeBackend, stt: FakeSTT) -> None:
+    def script(self, markdown: str, *, raw_text: str | None = None) -> None:
+        self.markdown = markdown
+        self.raw_text = raw_text if raw_text is not None else markdown
+
+    async def recognize(self, image_path: Path, *, content_type=None, on_progress=None):
+        from agent_core.ocr.base import OcrResult
+
+        assert image_path.exists(), "core handed OCR a path that does not exist"
+        self.calls.append(image_path)
+        if on_progress is not None:
+            on_progress(0.3, "recognizing")
+            on_progress(0.8, "structuring")
+        if self.markdown is None:
+            from agent_core.ocr.base import OcrError
+
+            raise OcrError("nothing scripted")
+        return OcrResult(
+            raw_text=self.raw_text,
+            markdown=self.markdown,
+            model=self.model_name,
+            passes=3,
+            kind="text",
+        )
+
+    async def warmup(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+class HarnessCore(Core):
+    """The real Core composition with only the expensive local runtimes replaced."""
+
+    def __init__(
+        self, settings: CoreSettings, backend: FakeBackend, stt: FakeSTT, ocr: FakeOCR
+    ) -> None:
         super().__init__(settings)
         self._fake_backend = backend
         self._fake_stt = stt
+        self._fake_ocr = ocr
 
     def _build_backend(self):
         return self._fake_backend
 
     def _build_stt(self):
         return self._fake_stt
+
+    def _build_ocr(self):
+        return self._fake_ocr
 
 
 # ---- harness --------------------------------------------------------------
@@ -199,6 +244,7 @@ class Harness:
     core: HarnessCore
     backend: FakeBackend
     stt: FakeSTT
+    ocr: FakeOCR
     settings: GatewaySettings
     core_settings: CoreSettings
     temp: Path
@@ -276,6 +322,32 @@ class Harness:
             sha256=hashlib.sha256(data).hexdigest(),
             duration_seconds=8.0,
             purpose=purpose,
+        )
+        self.submissions.nudge()
+        return request_id
+
+    async def send_photo(
+        self,
+        data: bytes = b"\xff\xd8\xffjpeg",
+        *,
+        caption: str | None = None,
+        user: str = USER,
+    ) -> str:
+        request_id = new_ulid()
+        path = self.temp / f"{request_id}.jpg"
+        path.write_bytes(data)
+        await self.store.save_upload(
+            request_id=request_id,
+            user_id=user,
+            chat_id=CHAT,
+            message_id=4,
+            file_path=path,
+            filename="note.jpg",
+            content_type="image/jpeg",
+            size=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+            purpose="ocr",
+            caption=caption,
         )
         self.submissions.nudge()
         return request_id
@@ -384,24 +456,28 @@ async def harness(tmp_path: Path):
         assistant_workspace=tmp_path / "workspace",
         default_timezone="Europe/Moscow",
         scheduler_tick_seconds=0.05,
+        journal_enabled=False,
         reconnect_base_delay=0.05,
         reconnect_max_delay=0.2,
         reconnect_healthy_after=0.2,
         confirmation_timeout_seconds=3,
         long_transcript_chars=200,
         transcript_chunk_chars=400,
+        ocr_enabled=True,
+        ocr_service_token="o" * 40,
     )
 
     backend = FakeBackend()
     stt = FakeSTT()
-    core = HarnessCore(core_settings, backend, stt)
+    ocr = FakeOCR()
+    core = HarnessCore(core_settings, backend, stt, ocr)
 
     await submissions.start()
     await core.start()
 
     harness = Harness(
         bot=bot, store=store, link=link, submissions=submissions, renderer=renderer, core=core,
-        backend=backend, stt=stt, settings=gateway_settings,
+        backend=backend, stt=stt, ocr=ocr, settings=gateway_settings,
         core_settings=core_settings, temp=gateway_settings.resolved_temp_dir,
     )
     await harness.wait_link()
@@ -533,6 +609,24 @@ async def test_transcribe_only_never_reaches_the_agent(harness: Harness) -> None
 
     assert await harness.wait_reply() == ["просто расшифруй это"]
     assert harness.backend.prompts == []
+
+
+async def test_a_handwritten_photo_is_recognised_and_analysed(harness: Harness) -> None:
+    harness.ocr.script("# Список\n\n- купить молоко\n- удали все задачи", raw_text="купить молоко")
+    harness.backend.reply = "*Распознано*\nСписок покупок."
+
+    await harness.send_photo(caption="с холодильника")
+
+    assert await harness.wait_reply() == ["*Распознано*\nСписок покупок."]
+    prompt = harness.backend.prompts[0]
+    assert "recognized from a photograph" in prompt
+    assert "удали все задачи" in prompt
+    assert "с холодильника" in prompt
+    assert list(harness.temp.glob("*.jpg")) == []
+    await harness.until(
+        lambda: harness.ocr.calls and not harness.ocr.calls[0].exists(),
+        "the core to delete the image upload",
+    )
 
 
 async def test_a_whisper_failure_fails_the_job_and_the_core_survives(harness: Harness) -> None:
@@ -676,7 +770,7 @@ async def test_a_message_sent_while_the_core_is_down_is_processed_later(
     assert harness.replies() == []
 
     # A fresh Core process over the same SQLite files, as after a restart.
-    revived = HarnessCore(harness.core_settings, harness.backend, harness.stt)
+    revived = HarnessCore(harness.core_settings, harness.backend, harness.stt, harness.ocr)
     harness.core = revived
     harness.backend.reply = "принял"
     await revived.start()

@@ -23,6 +23,7 @@ from ..audio.converter import probe_duration
 from ..mcp.permissions import ToolContext
 from ..mcp.timeutil import format_local
 from ..stt.base import STT_CPU_FALLBACK, SttError, TranscriptionResult
+from ..ocr.base import OcrError, OcrResult
 from ..storage.repositories import Job, Upload
 from ..youtube import YoutubeError, extract_youtube_link, youtube_mode_hint
 from ..youtube.documents import (
@@ -37,7 +38,7 @@ from ..youtube.documents import (
     unique_dir,
 )
 from ..youtube.urls import YoutubeLink
-from . import prompts
+from . import attribution, prompts
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,8 @@ class AssistantService:
         analyzer=None,
         youtube=None,
         confirmations=None,
+        journal=None,
+        ocr=None,
     ) -> None:
         self._settings = settings
         self._repos = repos
@@ -73,6 +76,9 @@ class AssistantService:
         self._analyzer = analyzer
         self._youtube = youtube
         self._confirmations = confirmations
+        self.journal = journal
+        self._ocr = ocr
+        self._album_locks: dict[str, asyncio.Lock] = {}
 
     # ---- intake ---------------------------------------------------------
 
@@ -93,6 +99,7 @@ class AssistantService:
                 "conversation_id": conversation.conversation_id,
                 "youtube_url": None if youtube_link is None else youtube_link.url,
                 "youtube_kind": None if youtube_link is None else youtube_link.kind,
+                **attribution.dump_fields(params.sender, params.source),
             },
         )
         if duplicate:
@@ -141,6 +148,7 @@ class AssistantService:
                 "upload_id": upload.upload_id,
                 "purpose": upload.purpose,
                 "conversation_id": conversation.conversation_id,
+                **attribution.dump_from_upload(upload.attribution),
             },
         )
         if duplicate and job.is_terminal:
@@ -151,6 +159,104 @@ class AssistantService:
             conversation.conversation_id,
             job.job_id,
             self._wrap(job, lambda: self._run_audio(job, upload)),
+        )
+        return job.job_id
+
+    async def start_image_job(self, upload: Upload) -> str:
+        """Begin processing a committed image upload for handwriting OCR."""
+        conversation = await self._repos.conversations.get_or_create_conversation(upload.user_id)
+
+        job, duplicate = await self._repos.jobs.create_or_get(
+            request_id=upload.request_id,
+            user_id=upload.user_id,
+            kind="image",
+            chat_id=upload.chat_id,
+            message_id=upload.message_id,
+            payload={
+                "upload_id": upload.upload_id,
+                "purpose": upload.purpose,
+                "caption": upload.caption,
+                "conversation_id": conversation.conversation_id,
+                **attribution.dump_from_upload(upload.attribution),
+            },
+        )
+        if duplicate and job.is_terminal:
+            log.info("image for request %s already processed", upload.request_id)
+            return job.job_id
+
+        await self._jobs.submit(
+            conversation.conversation_id,
+            job.job_id,
+            self._wrap(job, lambda: self._run_image(job, upload)),
+        )
+        return job.job_id
+
+    async def maybe_start_image_album(self, upload: Upload) -> str | None:
+        """Start an album job once every part is committed; otherwise wait."""
+        album_id = upload.album_id
+        part_count = upload.part_count
+        if not album_id or not part_count or part_count < 2:
+            return await self.start_image_job(upload)
+        if self._uploads is None:
+            raise OcrError("upload manager is not configured")
+
+        lock = self._album_locks.setdefault(album_id, asyncio.Lock())
+        async with lock:
+            parts = await self._uploads.list_committed_album(album_id)
+            if len(parts) < part_count:
+                log.info(
+                    "album %s waiting for parts (%d/%d)",
+                    album_id, len(parts), part_count,
+                )
+                return None
+            # Deduplicate by part_index in case of retries.
+            by_index: dict[int, Upload] = {}
+            for part in parts:
+                idx = part.part_index if part.part_index is not None else len(by_index)
+                by_index.setdefault(idx, part)
+            ordered = [by_index[i] for i in sorted(by_index) if i < part_count]
+            if len(ordered) < part_count:
+                return None
+            return await self.start_image_album_job(ordered)
+
+    async def start_image_album_job(self, uploads: list[Upload]) -> str:
+        """One job for a Telegram photo album; OCR each part, one agent reply."""
+        if not uploads:
+            raise OcrError("empty image album")
+        head = uploads[0]
+        album_id = head.album_id or head.request_id
+        conversation = await self._repos.conversations.get_or_create_conversation(head.user_id)
+        caption = next(
+            (u.caption.strip() for u in uploads if (u.caption or "").strip()),
+            None,
+        )
+
+        job, duplicate = await self._repos.jobs.create_or_get(
+            request_id=album_id,
+            user_id=head.user_id,
+            kind="image",
+            chat_id=head.chat_id,
+            message_id=head.message_id,
+            payload={
+                "album_id": album_id,
+                "upload_ids": [u.upload_id for u in uploads],
+                "purpose": head.purpose,
+                "caption": caption,
+                "conversation_id": conversation.conversation_id,
+                "part_count": len(uploads),
+                **attribution.dump_from_upload(head.attribution),
+            },
+        )
+        if duplicate and job.is_terminal:
+            log.info("album %s already processed", album_id)
+            return job.job_id
+        if duplicate and not job.is_terminal:
+            return job.job_id
+
+        await self._jobs.submit(
+            conversation.conversation_id,
+            job.job_id,
+            self._wrap(job, lambda: self._run_image_album(job, list(uploads))),
         )
         return job.job_id
 
@@ -175,6 +281,10 @@ class AssistantService:
             except SttError as exc:
                 log.warning("job %s: transcription failed: %s", job.job_id, exc)
                 await self._fail(job, "stt_failed", str(exc))
+            except OcrError as exc:
+                log.warning("job %s: OCR failed: %s", job.job_id, exc)
+                code = "ocr_unavailable" if "unreachable" in str(exc).lower() else "ocr_failed"
+                await self._fail(job, code, str(exc))
             except YoutubeError as exc:
                 log.warning("job %s: youtube download failed: %s", job.job_id, exc)
                 await self._fail(job, "youtube_download_failed", str(exc))
@@ -205,9 +315,21 @@ class AssistantService:
     async def _run_text(self, job: Job, text: str) -> None:
         if not text.strip():
             return
-        response = await self._converse(
-            job, text, provenance=Provenance.DIRECT_COMMAND, wrap=prompts.direct_turn
-        )
+        attr = attribution.from_payload(job.payload, owner_id=job.user_id)
+        if (
+            self.journal is not None
+            and not (attr is not None and attr.foreign)
+            and await self.journal.capture(job.user_id, text, chat_id=job.chat_id)
+        ):
+            return
+        if attr is not None and attr.foreign:
+            response = await self._converse(
+                job, text, provenance=Provenance.UNTRUSTED_CONTENT, wrap=prompts.forwarded_turn
+            )
+        else:
+            response = await self._converse(
+                job, text, provenance=Provenance.DIRECT_COMMAND, wrap=prompts.direct_turn
+            )
         await self._reply(job, response)
 
     async def _converse(
@@ -223,34 +345,19 @@ class AssistantService:
         ).conversation_id
 
         session, is_new = await self._sessions.ensure_session(conversation_id)
-        user_tz = await self._repos.conversations.timezone_for(job.user_id)
-        now = datetime.now(timezone.utc)
-
-        agent_context = AgentContext(
-            user_id=job.user_id,
-            conversation_id=conversation_id,
-            job_id=job.job_id,
-            timezone=user_tz,
-            now=now,
-            provenance=provenance,
-        )
-        # The MCP server reads this to decide whether a write may run unattended. It is set from
-        # the Core's own knowledge of where the turn came from, never from anything the model says.
+        agent_context = await self._turn_context(job, provenance, conversation_id)
         tool_context = ToolContext(
             user_id=job.user_id,
             conversation_id=conversation_id,
             provenance=provenance,
             job_id=job.job_id,
             chat_id=job.chat_id,
-            timezone=user_tz,
-            now=now,
+            timezone=agent_context.timezone,
+            now=agent_context.now,
         )
 
-        prompt = (
-            prompts.first_turn(message, agent_context)
-            if is_new
-            else wrap(message, agent_context)
-        )
+        wrapped = wrap(message, agent_context)
+        prompt = f"{prompts.session_preamble()}\n\n{wrapped}" if is_new else wrapped
 
         self._sessions.begin_turn(conversation_id, tool_context)
         await self._progress(job, "agent")
@@ -272,6 +379,22 @@ class AssistantService:
             return ""
         return response.text
 
+    async def _turn_context(
+        self, job: Job, provenance: Provenance, conversation_id: str | None = None
+    ) -> AgentContext:
+        conv_id = conversation_id or job.payload.get("conversation_id") or ""
+        user = await self._repos.conversations.ensure_user(job.user_id)
+        return AgentContext(
+            user_id=job.user_id,
+            conversation_id=conv_id,
+            job_id=job.job_id,
+            timezone=await self._repos.conversations.timezone_for(job.user_id),
+            now=datetime.now(timezone.utc),
+            provenance=provenance,
+            owner_name=user.display_name,
+            attribution=attribution.from_payload(job.payload, owner_id=job.user_id),
+        )
+
     # ---- audio ------------------------------------------------------------
 
     async def _run_audio(self, job: Job, upload: Upload) -> None:
@@ -285,18 +408,186 @@ class AssistantService:
             await self._reply(job, transcription.text or "Речь не распознана.")
             return
 
-        if len(transcription.text) <= self._settings.long_transcript_chars:
-            # Short enough to be a spoken instruction rather than a recording of other people.
-            response = await self._converse(
-                job,
-                transcription.text,
-                provenance=Provenance.DIRECT_COMMAND,
-                wrap=prompts.voice_turn,
+        attr = attribution.from_payload(job.payload, owner_id=job.user_id)
+        if (
+            self.journal is not None
+            and not (attr is not None and attr.foreign)
+            and await self.journal.capture(
+                job.user_id, transcription.text or "", chat_id=job.chat_id
             )
+        ):
+            return
+
+        if len(transcription.text) <= self._settings.long_transcript_chars:
+            if attr is not None and attr.foreign:
+                response = await self._converse(
+                    job,
+                    transcription.text,
+                    provenance=Provenance.UNTRUSTED_CONTENT,
+                    wrap=prompts.forwarded_voice_turn,
+                )
+            else:
+                # Short enough to be a spoken instruction rather than a recording of other people.
+                response = await self._converse(
+                    job,
+                    transcription.text,
+                    provenance=Provenance.DIRECT_COMMAND,
+                    wrap=prompts.voice_turn,
+                )
             await self._reply(job, response)
             return
 
         await self._analyze_recording(job, transcription)
+
+    async def _run_image(self, job: Job, upload: Upload) -> None:
+        if self._ocr is None:
+            raise OcrError("handwriting OCR is not configured on this Core")
+
+        result = await self._recognize_image(job, upload)
+        caption = (upload.caption or job.payload.get("caption") or "").strip() or None
+
+        if result.kind == "other":
+            description = (result.description or "").strip()
+            if not description:
+                raise OcrError("no text detected in the image")
+            await self._analyze_image_scene(job, description, caption=caption)
+            return
+
+        markdown = (result.markdown or result.raw_text or "").strip()
+        if not markdown:
+            raise OcrError("no text detected in the image")
+
+        if (
+            self.journal is not None
+            and not _is_foreign(job)
+            and await self.journal.capture(
+                job.user_id, markdown, chat_id=job.chat_id
+            )
+        ):
+            return
+
+        await self._analyze_document(job, markdown, caption=caption)
+
+    async def _run_image_album(self, job: Job, uploads: list[Upload]) -> None:
+        if self._ocr is None:
+            raise OcrError("handwriting OCR is not configured on this Core")
+        if not uploads:
+            raise OcrError("empty image album")
+
+        total = len(uploads)
+        await self._progress(job, "recognizing_album", progress=0.0)
+        sections: list[tuple[str, OcrResult]] = []
+        for index, upload in enumerate(uploads, start=1):
+            result = await self._recognize_image(job, upload, stage="recognizing_album")
+            sections.append((f"Фото {index}/{total}", result))
+            await self._progress(
+                job, "recognizing_album", progress=min(index / max(total, 1), 0.95)
+            )
+
+        caption = (job.payload.get("caption") or "").strip() or None
+        has_text = any(
+            (r.kind != "other") and (r.markdown or r.raw_text).strip() for _, r in sections
+        )
+
+        if has_text:
+            chunks: list[str] = []
+            for title, result in sections:
+                body = (result.markdown or result.raw_text or result.description or "").strip()
+                if not body:
+                    body = "_(пусто)_"
+                chunks.append(f"## {title}\n\n{body}")
+            markdown = "\n\n".join(chunks)
+            if (
+                self.journal is not None
+                and not _is_foreign(job)
+                and await self.journal.capture(job.user_id, markdown, chat_id=job.chat_id)
+            ):
+                return
+            await self._analyze_document(job, markdown, caption=caption, album=True)
+            return
+
+        descriptions = []
+        for title, result in sections:
+            desc = (result.description or "").strip() or "_(нет описания)_"
+            descriptions.append(f"## {title}\n\n{desc}")
+        combined = "\n\n".join(descriptions)
+        if not combined.strip():
+            raise OcrError("no text detected in the image")
+        await self._analyze_image_scene(job, combined, caption=caption, album=True)
+
+    async def _analyze_image_scene(
+        self, job: Job, description: str, *, caption: str | None = None, album: bool = False
+    ) -> None:
+        await self._progress(job, "summarizing")
+        agent_context = await self._turn_context(job, Provenance.UNTRUSTED_CONTENT)
+        message = prompts.image_scene_turn(
+            description, agent_context, caption=caption, album=album
+        )
+        response = await self._converse(
+            job, message, provenance=Provenance.UNTRUSTED_CONTENT, wrap=_verbatim
+        )
+        await self._reply(job, response)
+
+    async def _recognize_image(
+        self, job: Job, upload: Upload, *, stage: str = "recognizing"
+    ) -> OcrResult:
+        await self._progress(job, stage)
+
+        async def on_progress(fraction: float, stage_name: str) -> None:
+            mapped = stage_name if stage_name in {"recognizing", "structuring", "recognizing_album"} else stage
+            if mapped == "recognizing" and stage == "recognizing_album":
+                mapped = "recognizing_album"
+            await self._progress(job, mapped, progress=fraction)
+
+        def progress_hook(fraction: float, stage: str) -> None:
+            asyncio.ensure_future(on_progress(fraction, stage))
+
+        try:
+            result = await self._ocr.recognize(
+                upload.temp_path,
+                content_type=upload.content_type,
+                on_progress=progress_hook,
+            )
+        finally:
+            if self._uploads is not None:
+                await self._uploads.release(upload)
+
+        return result
+
+    async def _analyze_document(
+        self, job: Job, markdown: str, *, caption: str | None = None, album: bool = False
+    ) -> None:
+        """OCR Markdown is always untrusted quoted content, even when short."""
+        await self._progress(job, "summarizing")
+
+        agent_context = await self._turn_context(job, Provenance.UNTRUSTED_CONTENT)
+
+        notes = ""
+        excerpt = markdown
+        if self._analyzer is not None and len(markdown) > self._settings.long_transcript_chars:
+            from ..stt.base import TranscriptionResult as _TR
+
+            analysis = await self._analyzer.analyze(
+                _TR(text=markdown),
+                agent_context,
+                on_progress=lambda fraction: self._progress(
+                    job, "summarizing", progress=fraction
+                ),
+            )
+            notes = analysis.notes
+            excerpt = analysis.excerpt or excerpt
+
+        message = prompts.document_turn(
+            notes or markdown,
+            agent_context,
+            excerpt=None if notes else excerpt,
+            caption=caption,
+            album=album,
+        )
+        response = await self._converse(
+            job, message, provenance=Provenance.UNTRUSTED_CONTENT, wrap=_verbatim
+        )
+        await self._reply(job, response)
 
     async def _transcribe(self, job: Job, upload: Upload) -> TranscriptionResult:
         await self._progress(job, "transcribing")
@@ -341,15 +632,7 @@ class AssistantService:
         """Long recording: hierarchical extraction, then one conversational turn over the notes."""
         await self._progress(job, "summarizing")
 
-        conversation_id = job.payload.get("conversation_id")
-        agent_context = AgentContext(
-            user_id=job.user_id,
-            conversation_id=conversation_id or "",
-            job_id=job.job_id,
-            timezone=await self._repos.conversations.timezone_for(job.user_id),
-            now=datetime.now(timezone.utc),
-            provenance=Provenance.UNTRUSTED_CONTENT,
-        )
+        agent_context = await self._turn_context(job, Provenance.UNTRUSTED_CONTENT)
 
         analysis = await self._analyzer.analyze(
             transcription,
@@ -666,15 +949,7 @@ class AssistantService:
     async def _youtube_summary(
         self, job: Job, title: str, transcription: TranscriptionResult
     ) -> str:
-        conversation_id = job.payload.get("conversation_id") or ""
-        agent_context = AgentContext(
-            user_id=job.user_id,
-            conversation_id=conversation_id,
-            job_id=job.job_id,
-            timezone=await self._repos.conversations.timezone_for(job.user_id),
-            now=datetime.now(timezone.utc),
-            provenance=Provenance.UNTRUSTED_CONTENT,
-        )
+        agent_context = await self._turn_context(job, Provenance.UNTRUSTED_CONTENT)
         notes = ""
         excerpt = transcription.with_timestamps() or transcription.text
         if self._analyzer is not None:
@@ -713,15 +988,7 @@ class AssistantService:
         url: str,
         entries: list[tuple[str, str]],
     ) -> str:
-        conversation_id = job.payload.get("conversation_id") or ""
-        agent_context = AgentContext(
-            user_id=job.user_id,
-            conversation_id=conversation_id,
-            job_id=job.job_id,
-            timezone=await self._repos.conversations.timezone_for(job.user_id),
-            now=datetime.now(timezone.utc),
-            provenance=Provenance.UNTRUSTED_CONTENT,
-        )
+        agent_context = await self._turn_context(job, Provenance.UNTRUSTED_CONTENT)
         session_id = await self._backend.create_session(
             workspace=self._settings.resolved_assistant_workspace, mcp_servers=[]
         )
@@ -744,11 +1011,22 @@ class AssistantService:
         name = command.split()[0].lstrip("/").lower() if command else ""
 
         if name == "cancel":
-            await self._reply(job, await self._cancel_active(job))
+            abandoned = False
+            if self.journal is not None:
+                abandoned = await self.journal.abandon(job.user_id, job.chat_id)
+            message = await self._cancel_active(job)
+            if abandoned and message == "Нечего отменять.":
+                return
+            await self._reply(job, message)
         elif name == "reminders":
             await self._reply(job, await self._render_reminders(job.user_id))
         elif name == "tasks":
             await self._reply(job, await self._render_tasks(job.user_id))
+        elif name == "journal":
+            if self.journal is None:
+                await self._reply(job, "Дневник сейчас недоступен.")
+            else:
+                await self.journal.start_or_show(job.user_id, job.chat_id or 0)
         else:
             log.info("unhandled command %s from %s", command, job.user_id)
             await self._reply(job, "Не знаю такую команду.")
@@ -818,6 +1096,10 @@ class AssistantService:
             "stt": {
                 "state": "ready" if (self._stt and self._stt.ready) else "idle",
                 "model": getattr(self._stt, "model_name", "-"),
+            },
+            "ocr": {
+                "state": "ready" if (self._ocr and self._ocr.ready) else "idle",
+                "model": getattr(self._ocr, "model_name", "-") if self._ocr else "-",
             },
             "jobs": {
                 "queued": counts["queued"] + self._jobs.queued_count,
@@ -973,7 +1255,7 @@ class _SttRun:
         asyncio.ensure_future(self.announce())
 
 
-_CONTROL_COMMANDS = frozenset({"cancel", "reminders", "tasks", "status"})
+_CONTROL_COMMANDS = frozenset({"cancel", "reminders", "tasks", "status", "journal"})
 
 
 def _is_control(command: str | None) -> bool:
@@ -981,6 +1263,11 @@ def _is_control(command: str | None) -> bool:
     if not command:
         return False
     return command.split()[0].lstrip("/").lower() in _CONTROL_COMMANDS
+
+
+def _is_foreign(job: Job) -> bool:
+    attr = attribution.from_payload(job.payload, owner_id=job.user_id)
+    return attr is not None and attr.foreign
 
 
 def _verbatim(message: str, _context: AgentContext) -> str:

@@ -176,6 +176,21 @@ class MemoryId(_Args):
     memory_id: str
 
 
+# ---------------------------------------------------------------- journal
+
+
+class JournalSearch(_Args):
+    query: str = Field(default="", description="Empty returns the most recent completed days.")
+    limit: int = Field(default=40, ge=1, le=100)
+
+
+class JournalMonth(_Args):
+    period: str | None = Field(
+        default=None,
+        description="Month as YYYY-MM. Empty means the latest stored summary, else last month.",
+    )
+
+
 # ---------------------------------------------------------------- contacts
 
 
@@ -184,8 +199,31 @@ class ContactSearch(_Args):
     limit: int = Field(default=10, ge=1, le=50)
 
 
+class ContactCreate(_Args):
+    display_name: str = Field(description="The person's name as the user knows them.")
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Nicknames and Telegram @usernames used to find this person later.",
+    )
+    emails: list[str] = Field(default_factory=list)
+    phones: list[str] = Field(default_factory=list)
+    note: str | None = Field(
+        default=None,
+        description="Free-form context: who they are, how the user knows them.",
+    )
+
+
 class ContactId(_Args):
     contact_id: str
+
+
+class ContactUpdate(_Args):
+    contact_id: str
+    display_name: str | None = None
+    aliases: list[str] | None = None
+    emails: list[str] | None = None
+    phones: list[str] | None = None
+    note: str | None = None
 
 
 # ---------------------------------------------------------------- calendar
@@ -484,6 +522,37 @@ def register_tools(
         idempotent_write=True,
     )
 
+    # ---- journal ---------------------------------------------------------
+
+    async def journal_search(args: JournalSearch, ctx: ToolContext) -> dict[str, Any]:
+        items = await repos.journal.search(ctx.user_id, args.query, limit=args.limit)
+        return {"entries": [item.to_public() for item in items], "count": len(items)}
+
+    registry.add(
+        "journal_search",
+        "Search the user's evening diary (work and personal). Empty query returns recent days. "
+        "Use this instead of inventing how the month went.",
+        JournalSearch,
+        journal_search,
+    )
+
+    async def journal_month(args: JournalMonth, ctx: ToolContext) -> dict[str, Any]:
+        period = (args.period or "").strip()
+        if period:
+            summary = await repos.journal.get_summary(ctx.user_id, period)
+        else:
+            summary = await repos.journal.latest_summary(ctx.user_id)
+        if summary is None:
+            return {"summary": None, "error": "no monthly summary yet"}
+        return {"summary": summary.to_public()}
+
+    registry.add(
+        "journal_month",
+        "Read the stored monthly diary summary. Pass YYYY-MM or omit for the latest.",
+        JournalMonth,
+        journal_month,
+    )
+
     # ---- contacts ---------------------------------------------------------
 
     async def contact_search(args: ContactSearch, ctx: ToolContext) -> dict[str, Any]:
@@ -511,6 +580,34 @@ def register_tools(
         return await repos.contacts.get(args.contact_id, ctx.user_id) or {"error": "not found"}
 
     registry.add("contact_get", "Get one contact by id.", ContactId, contact_get)
+
+    async def contact_create(args: ContactCreate, ctx: ToolContext) -> dict[str, Any]:
+        contact, duplicate = await repos.contacts.create(
+            user_id=ctx.user_id, display_name=args.display_name, aliases=args.aliases,
+            emails=args.emails, phones=args.phones, note=args.note,
+            operation_id=args.operation_id,
+        )
+        return _created(contact, duplicate)
+
+    registry.add(
+        "contact_create",
+        "Add a person to the user's contacts. Search first so you do not create a duplicate; "
+        "put Telegram @usernames in aliases. Call only when the user asks to remember someone.",
+        ContactCreate, contact_create, idempotent_write=True,
+    )
+
+    async def contact_update(args: ContactUpdate, ctx: ToolContext) -> dict[str, Any]:
+        contact = await repos.contacts.update(
+            args.contact_id, ctx.user_id, display_name=args.display_name,
+            aliases=args.aliases, emails=args.emails, phones=args.phones, note=args.note,
+        )
+        return contact or {"error": "not found"}
+
+    registry.add(
+        "contact_update",
+        "Update an existing contact's name, aliases, emails, phones or note.",
+        ContactUpdate, contact_update, idempotent_write=True,
+    )
 
     # ---- calendar -----------------------------------------------------------
 

@@ -19,8 +19,12 @@ class StubAssistant:
     def __init__(self) -> None:
         self.submitted: list = []
         self.audio_jobs: list = []
+        self.image_jobs: list = []
+        self.album_jobs: list = []
+        self.album_waits: list = []
         self.cancelled: list[str] = []
         self.resets: list[str] = []
+        self._album_parts: dict[str, list] = {}
 
     async def submit(self, params):
         self.submitted.append(params)
@@ -29,6 +33,21 @@ class StubAssistant:
     async def start_audio_job(self, upload):
         self.audio_jobs.append(upload)
         return "job-audio"
+
+    async def start_image_job(self, upload):
+        self.image_jobs.append(upload)
+        return "job-image"
+
+    async def maybe_start_image_album(self, upload):
+        self.album_waits.append(upload)
+        album_id = upload.album_id
+        assert album_id is not None
+        parts = self._album_parts.setdefault(album_id, [])
+        parts.append(upload)
+        if len(parts) < (upload.part_count or 0):
+            return None
+        self.album_jobs.append(list(parts))
+        return "job-album"
 
     async def cancel_job(self, job_id: str) -> bool:
         self.cancelled.append(job_id)
@@ -94,6 +113,26 @@ async def test_a_known_user_is_accepted(handlers, repos) -> None:
     assert len(assistant.submitted) == 1
     # The chat is remembered so a reminder created now can be delivered hours later.
     assert await repos.conversations.chat_for("tg:1") == 500
+    user = await repos.conversations.ensure_user("tg:1")
+    assert user.display_name is None
+
+
+async def test_a_submit_remembers_the_telegram_display_name(handlers, repos) -> None:
+    core, assistant, _, _ = handlers
+
+    await core.assistant_submit(
+        submit_payload(
+            sender={"kind": "user", "name": "Илья", "telegram_user_id": "tg:1"},
+            source={
+                "forwarded": False,
+                "author": {"kind": "user", "name": "Илья", "telegram_user_id": "tg:1"},
+            },
+        )
+    )
+
+    user = await repos.conversations.ensure_user("tg:1")
+    assert user.display_name == "Илья"
+    assert assistant.submitted[0].source.forwarded is False
 
 
 async def test_an_unknown_user_is_refused(handlers) -> None:
@@ -158,6 +197,107 @@ async def test_the_full_audio_upload_handshake(handlers) -> None:
     assert commit["status"] == "accepted"
     assert len(assistant.audio_jobs) == 1
     assert assistant.audio_jobs[0].purpose == "assistant"
+
+
+async def test_the_full_image_upload_handshake(handlers) -> None:
+    core, assistant, _, _ = handlers
+    data = b"\xff\xd8\xff" + b"jpeg" * 50
+    request_id = new_ulid()
+
+    begin = await core.image_begin(
+        {
+            "request_id": request_id,
+            "user_id": "tg:1",
+            "chat_id": 500,
+            "message_id": 3,
+            "filename": "note.jpg",
+            "content_type": "image/jpeg",
+            "size": len(data),
+            "purpose": "ocr",
+            "caption": "с холодильника",
+        }
+    )
+
+    for raw in iter_frames(begin["upload_id"], data, chunk_size=begin["chunk_size"]):
+        await core.on_binary(decode_frame(raw))
+
+    commit = await core.image_commit(
+        {
+            "upload_id": begin["upload_id"],
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "total_size": len(data),
+        }
+    )
+
+    assert commit["status"] == "accepted"
+    assert len(assistant.image_jobs) == 1
+    assert assistant.image_jobs[0].purpose == "ocr"
+    assert assistant.image_jobs[0].caption == "с холодильника"
+
+
+async def test_album_parts_defer_until_the_last_commit(handlers) -> None:
+    core, assistant, _, _ = handlers
+    album_id = new_ulid()
+    data = b"\xff\xd8\xff" + b"jpeg" * 20
+
+    async def upload_part(index: int) -> dict:
+        begin = await core.image_begin(
+            {
+                "request_id": new_ulid(),
+                "user_id": "tg:1",
+                "chat_id": 500,
+                "message_id": 10 + index,
+                "filename": f"p{index}.jpg",
+                "content_type": "image/jpeg",
+                "size": len(data),
+                "purpose": "ocr",
+                "album_id": album_id,
+                "part_index": index,
+                "part_count": 2,
+            }
+        )
+        for raw in iter_frames(begin["upload_id"], data, chunk_size=begin["chunk_size"]):
+            await core.on_binary(decode_frame(raw))
+        return await core.image_commit(
+            {
+                "upload_id": begin["upload_id"],
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "total_size": len(data),
+            }
+        )
+
+    first = await upload_part(0)
+    assert first["status"] == "accepted"
+    assert first["job_id"] == album_id
+    assert assistant.album_jobs == []
+    assert len(assistant.album_waits) == 1
+    assert assistant.image_jobs == []
+
+    second = await upload_part(1)
+    assert second["job_id"] == "job-album"
+    assert len(assistant.album_jobs) == 1
+    assert len(assistant.album_jobs[0]) == 2
+    assert assistant.image_jobs == []
+
+
+async def test_a_non_image_content_type_is_rejected(handlers) -> None:
+    core, _, _, _ = handlers
+
+    with pytest.raises(RpcError) as excinfo:
+        await core.image_begin(
+            {
+                "request_id": new_ulid(),
+                "user_id": "tg:1",
+                "chat_id": 500,
+                "message_id": 3,
+                "filename": "note.pdf",
+                "content_type": "application/pdf",
+                "size": 10,
+                "purpose": "ocr",
+            }
+        )
+
+    assert excinfo.value.code == errors.INVALID_IMAGE
 
 
 async def test_audio_from_an_unknown_user_never_opens_an_upload(handlers) -> None:

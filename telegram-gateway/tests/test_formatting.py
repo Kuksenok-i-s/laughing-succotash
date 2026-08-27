@@ -72,7 +72,9 @@ def test_error_codes_become_human_text() -> None:
 def test_stage_text_describes_the_current_work() -> None:
     assert describe_stage("transcribing") == "Расшифровываю запись…"
     assert "CPU" in describe_stage("transcribing_cpu")
-    assert describe_stage("summarizing").startswith("Расшифровка готова")
+    assert describe_stage("recognizing") == "Смотрю фотографию…"
+    assert describe_stage("recognizing_album") == "Смотрю фотографии…"
+    assert describe_stage("summarizing") == "Разбираю…"
     assert describe_stage("executing_tool", "calendar_create").endswith("(calendar_create)")
     assert describe_stage("unknown_stage") == "Обрабатываю…"
 

@@ -1,14 +1,12 @@
-"""faster-whisper on the local GPU, loaded once and kept.
+"""faster-whisper on the local GPU.
 
-Loading large-v3 costs far more than a typical transcription, which is the reason this service
-exists at all: the SSH pipeline it replaces paid that cost on every single job, plus a virtualenv
-check, a script upload and a process launch.
-
-The import is deferred so the module can be exercised without CUDA or faster-whisper present.
+The model is loaded on the worker thread, not at HTTP bind, and dropped after a stretch of idle
+time so OCR and Whisper can share one card.
 """
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
 from collections.abc import Callable
@@ -29,6 +27,8 @@ class Engine(Protocol):
     def model_name(self) -> str: ...
 
     def load(self) -> None: ...
+
+    def unload(self) -> None: ...
 
     def transcribe(
         self,
@@ -66,6 +66,8 @@ class WhisperEngine:
         return self._model_name
 
     def load(self) -> None:
+        if self._model is not None:
+            return
         from faster_whisper import WhisperModel
 
         started = time.monotonic()
@@ -80,6 +82,20 @@ class WhisperEngine:
             self._compute_type,
         )
 
+    def unload(self) -> None:
+        if self._model is None:
+            return
+        self._model = None
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        log.info("whisper %s unloaded", self._model_name)
+
     def transcribe(
         self,
         audio_path: Path,
@@ -89,7 +105,7 @@ class WhisperEngine:
         on_progress: ProgressHook | None = None,
     ) -> dict[str, Any]:
         if self._model is None:
-            raise RuntimeError("model is not loaded yet")
+            self.load()
 
         segments_iter, info = self._model.transcribe(
             str(audio_path),

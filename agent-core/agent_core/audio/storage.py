@@ -110,6 +110,11 @@ class UploadManager:
         size: int,
         duration_seconds: float | None,
         purpose: str,
+        caption: str | None = None,
+        attribution: dict | None = None,
+        album_id: str | None = None,
+        part_index: int | None = None,
+        part_count: int | None = None,
     ) -> tuple[Upload, int]:
         """Open an upload, or resume the one already open for this ``request_id``.
 
@@ -117,7 +122,7 @@ class UploadManager:
         """
         if size > self._max_bytes:
             raise AudioUploadError(
-                f"audio is {size // 1024 // 1024} MB, over the limit", code="too_large"
+                f"file is {size // 1024 // 1024} MB, over the limit", code="too_large"
             )
 
         existing = await self._uploads.find_open_by_request(request_id)
@@ -141,11 +146,16 @@ class UploadManager:
             temp_path=self._temp_dir / f"{request_id}-{_safe_name(filename)}",
             duration_seconds=duration_seconds,
             purpose=purpose,
+            caption=caption,
+            attribution=attribution,
+            album_id=album_id,
+            part_index=part_index,
+            part_count=part_count,
         )
         self._sinks[upload.upload_id] = UploadSink(upload, upload.temp_path, self._max_bytes)
         log.info(
-            "upload %s open for %s (%d bytes, purpose=%s)",
-            upload.upload_id, user_id, size, purpose,
+            "upload %s open for %s (%d bytes, purpose=%s album=%s)",
+            upload.upload_id, user_id, size, purpose, album_id or "-",
         )
         return upload, 0
 
@@ -219,6 +229,9 @@ class UploadManager:
         except OSError:
             log.debug("could not delete %s", upload.temp_path, exc_info=True)
         await self._uploads.set_status(upload.upload_id, "consumed")
+
+    async def list_committed_album(self, album_id: str) -> list[Upload]:
+        return await self._uploads.list_committed_album(album_id)
 
     async def sweep_stale(self) -> int:
         """Drop uploads that stopped mid-transfer, freeing their disk space."""

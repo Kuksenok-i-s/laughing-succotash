@@ -90,7 +90,8 @@ async def test_lists_tools_with_schemas(mcp) -> None:
 
     assert status == 200
     names = {tool["name"] for tool in body["result"]["tools"]}
-    assert {"reminder_create", "calendar_list", "note_search", "memory_remember"} <= names
+    assert {"reminder_create", "calendar_list", "note_search", "memory_remember",
+            "contact_create"} <= names
     # A generic shell escape hatch would defeat the whole capability model.
     assert not any("shell" in name or "exec" in name for name in names)
 
@@ -243,6 +244,78 @@ async def test_ambiguous_contacts_are_never_guessed(mcp, repos) -> None:
     assert payload["count"] == 2
     assert payload["ambiguous"] is True
     assert "не гадай" in payload["guidance"].lower() or "do not guess" in payload["guidance"]
+
+
+async def test_contact_create_runs_immediately_on_a_direct_command(mcp, repos) -> None:
+    server, contexts, confirmations = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+
+    payload, is_error = await Client(server, token).call_tool(
+        "contact_create",
+        {
+            "display_name": "Саша Иванов",
+            "aliases": ["@sasha"],
+            "phones": ["+79990001122"],
+            "operation_id": "op-contact",
+        },
+    )
+
+    assert not is_error and payload["created"] is True
+    assert payload["display_name"] == "Саша Иванов"
+    assert payload["aliases"] == ["@sasha"]
+    assert confirmations.requests == []
+    stored = await repos.contacts.search("tg:1", "саша")
+    assert len(stored) == 1
+
+
+async def test_contact_update_changes_an_existing_contact(mcp, repos) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+
+    created, _ = await client.call_tool(
+        "contact_create", {"display_name": "Саша", "operation_id": "op-cu-1"}
+    )
+    updated, is_error = await client.call_tool(
+        "contact_update",
+        {"contact_id": created["contact_id"], "phones": ["+7999"], "operation_id": "op-cu-2"},
+    )
+
+    assert not is_error
+    assert updated["display_name"] == "Саша"
+    assert updated["phones"] == ["+7999"]
+
+
+async def test_contact_create_from_a_recording_asks_first(mcp, repos) -> None:
+    server, contexts, confirmations = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.UNTRUSTED_CONTENT))
+
+    payload, _ = await Client(server, token).call_tool(
+        "contact_create",
+        {"display_name": "Маша из записи", "operation_id": "op-contact-untrusted"},
+    )
+
+    assert payload["created"] is True
+    assert len(confirmations.requests) == 1
+    assert confirmations.requests[0]["tool_name"] == "contact_create"
+    assert "Маша из записи" in confirmations.requests[0]["prompt_text"]
+
+
+async def test_replaying_a_contact_operation_id_does_not_create_twice(mcp, repos) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+    args = {"display_name": "Петя", "operation_id": "op-contact-same"}
+
+    first, _ = await client.call_tool("contact_create", args)
+    second, _ = await client.call_tool("contact_create", args)
+
+    assert first["contact_id"] == second["contact_id"]
+    assert len(await repos.contacts.search("tg:1", "петя")) == 1
 
 
 def _ctx(provenance: Provenance) -> ToolContext:

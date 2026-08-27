@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 
-from agent_core.youtube.download import YoutubeDownloader, YoutubeError
+from agent_core.youtube.download import YoutubeDownloader, YoutubeError, _entries_from_dump
 from agent_core.youtube.documents import (
     readable_filename,
     readable_media_filename,
@@ -187,11 +189,17 @@ def test_ytdlp_commands_pass_cookies_when_configured() -> None:
         cookies="/var/lib/telegram-gateway/youtube/cookies.txt",
     )
     url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-    audio = downloader._audio_remote_cmd(url, "job1", "video")
-    video = downloader._video_remote_cmd(url, "job1", "video")
+    audio = downloader._audio_remote_cmd(url, "job1")
+    video = downloader._video_remote_cmd(url, "job1")
     flag = "--cookies /var/lib/telegram-gateway/youtube/cookies.txt"
     assert flag in audio
     assert flag in video
+    assert "--no-playlist" in audio
+    assert "--no-playlist" in video
+    assert "--yes-playlist" not in audio
+    assert "--yes-playlist" not in video
+    assert "--max-downloads" not in audio
+    assert "--max-downloads" not in video
 
 
 def test_ytdlp_commands_omit_cookies_when_unset() -> None:
@@ -199,8 +207,8 @@ def test_ytdlp_commands_omit_cookies_when_unset() -> None:
         remote="root@host", remote_dir="/root/ytdl", ssh_key=Path("~/.ssh/id")
     )
     url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-    assert "--cookies" not in downloader._audio_remote_cmd(url, "job1", "video")
-    assert "--cookies" not in downloader._video_remote_cmd(url, "job1", "video")
+    assert "--cookies" not in downloader._audio_remote_cmd(url, "job1")
+    assert "--cookies" not in downloader._video_remote_cmd(url, "job1")
 
 
 def test_from_settings_reads_cookies(tmp_path: Path) -> None:
@@ -232,3 +240,230 @@ def test_from_settings_reads_cookies(tmp_path: Path) -> None:
     assert downloader is not None
     assert downloader._cookies == "/var/lib/telegram-gateway/youtube/cookies.txt"
     assert downloader._local_cookies == cookies
+
+
+def _downloader() -> YoutubeDownloader:
+    return YoutubeDownloader(
+        remote="root@host", remote_dir="/root/ytdl", ssh_key=Path("~/.ssh/id")
+    )
+
+
+def _write_media(dest_dir: Path, title: str, suffix: str) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{title} [xxxxxxxxxxx]"
+    (dest_dir / f"{stem}{suffix}").write_bytes(b"media")
+    (dest_dir / f"{stem}.info.json").write_text(
+        json.dumps({"id": "xxxxxxxxxxx", "title": title}),
+        encoding="utf-8",
+    )
+
+
+def test_flat_playlist_dump_becomes_watch_urls() -> None:
+    title, urls = _entries_from_dump(
+        {
+            "title": "Курс по сетям",
+            "entries": [
+                {"id": "aaaaaaaaaaa", "title": "Intro"},
+                None,
+                {
+                    "id": "bbbbbbbbbbb",
+                    "url": "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+                },
+                {"id": "aaaaaaaaaaa"},
+            ],
+        }
+    )
+    assert title == "Курс по сетям"
+    assert urls == [
+        "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+        "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+    ]
+
+
+def test_listing_command_is_metadata_only() -> None:
+    cmd = _downloader()._list_remote_cmd(
+        "https://www.youtube.com/playlist?list=PLtestPlaylist12"
+    )
+    assert "--flat-playlist" in cmd
+    assert "--no-download" in cmd
+    assert "-J" in cmd
+    assert "--playlist-end 40" in cmd
+    assert "--yes-playlist" not in cmd
+
+
+def test_single_video_does_not_list_a_playlist(tmp_path: Path, monkeypatch) -> None:
+    downloader = _downloader()
+
+    def fake_list(url: str):
+        raise AssertionError("watch URLs must not be listed as playlists")
+
+    def fake_run(cmd, dest_dir, job_id, ok_codes=(0,)):
+        assert "--no-playlist" in cmd
+        _write_media(dest_dir, "Me at the zoo", ".mp4")
+
+    monkeypatch.setattr(downloader, "_list_entries", fake_list)
+    monkeypatch.setattr(downloader, "_run_remote", fake_run)
+    dest = tmp_path / "job"
+    library = downloader._fetch_video(
+        "https://www.youtube.com/watch?v=jNQXAC9IVRw", dest, "job", "video"
+    )
+    assert [path.name for path in library.files] == ["Me at the zoo.mp4"]
+
+
+def test_playlist_videos_download_one_watch_url_at_a_time(
+    tmp_path: Path, monkeypatch
+) -> None:
+    downloader = _downloader()
+    remote_jobs: list[str] = []
+    live: list[str] = []
+    peak = 0
+
+    def fake_list(url: str):
+        return "Курс по сетям", [
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+            "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+        ]
+
+    def fake_run(cmd, dest_dir, job_id, ok_codes=(0,)):
+        nonlocal peak
+        remote_jobs.append(job_id)
+        live.append(job_id)
+        peak = max(peak, len(live))
+        assert "--no-playlist" in cmd
+        assert "--yes-playlist" not in cmd
+        title = "Intro" if job_id.endswith("01") else "Deep dive"
+        _write_media(dest_dir, title, ".mp4")
+        live.pop()
+
+    monkeypatch.setattr(downloader, "_list_entries", fake_list)
+    monkeypatch.setattr(downloader, "_run_remote", fake_run)
+    dest = tmp_path / "job"
+    library = downloader._fetch_video(
+        "https://www.youtube.com/playlist?list=PLtestPlaylist12",
+        dest,
+        "job",
+        "playlist",
+    )
+    assert remote_jobs == ["job-01", "job-02"]
+    assert peak == 1
+    assert library.title == "Курс по сетям"
+    assert [path.name for path in library.files] == [
+        "01 - Intro.mp4",
+        "02 - Deep dive.mp4",
+    ]
+    assert not list(dest.glob(".part-*"))
+
+
+def test_playlist_skips_a_failed_item_and_keeps_the_rest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    downloader = _downloader()
+
+    def fake_list(url: str):
+        return "Курс", [
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+            "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+        ]
+
+    def fake_run(cmd, dest_dir, job_id, ok_codes=(0,)):
+        if job_id.endswith("01"):
+            raise YoutubeError("boom")
+        _write_media(dest_dir, "Deep dive", ".mp4")
+
+    monkeypatch.setattr(downloader, "_list_entries", fake_list)
+    monkeypatch.setattr(downloader, "_run_remote", fake_run)
+    library = downloader._fetch_video(
+        "https://www.youtube.com/playlist?list=PLtest",
+        tmp_path / "job",
+        "job",
+        "playlist",
+    )
+    assert [path.name for path in library.files] == ["02 - Deep dive.mp4"]
+
+
+def test_playlist_all_failed_is_an_error(tmp_path: Path, monkeypatch) -> None:
+    downloader = _downloader()
+    monkeypatch.setattr(
+        downloader,
+        "_list_entries",
+        lambda url: ("Курс", ["https://www.youtube.com/watch?v=aaaaaaaaaaa"]),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "_run_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(YoutubeError("boom")),
+    )
+    try:
+        downloader._fetch_video(
+            "https://www.youtube.com/playlist?list=PLtest",
+            tmp_path / "job",
+            "job",
+            "playlist",
+        )
+    except YoutubeError as exc:
+        assert "no video file" in str(exc)
+    else:
+        raise AssertionError("expected YoutubeError")
+
+
+def test_playlist_audio_downloads_one_watch_url_at_a_time(
+    tmp_path: Path, monkeypatch
+) -> None:
+    downloader = _downloader()
+    remote_jobs: list[str] = []
+
+    def fake_run(cmd, dest_dir, job_id, ok_codes=(0,)):
+        remote_jobs.append(job_id)
+        assert "--no-playlist" in cmd
+        title = "Intro" if job_id.endswith("01") else "Deep dive"
+        _write_media(dest_dir, title, ".mp3")
+
+    monkeypatch.setattr(
+        downloader,
+        "_list_entries",
+        lambda url: (
+            "Курс по сетям",
+            [
+                "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+                "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+            ],
+        ),
+    )
+    monkeypatch.setattr(downloader, "_run_remote", fake_run)
+    batch = downloader._fetch_audio_batch(
+        "https://www.youtube.com/playlist?list=PLtest",
+        tmp_path / "job",
+        "job",
+        "playlist",
+    )
+    assert remote_jobs == ["job-01", "job-02"]
+    assert batch.title == "Курс по сетям"
+    assert [item.title for item in batch.items] == ["Intro", "Deep dive"]
+    assert [item.index for item in batch.items] == [1, 2]
+
+
+async def test_proxy_slot_serializes_fetches(tmp_path: Path) -> None:
+    downloader = _downloader()
+    current = 0
+    peak = 0
+
+    def slow(url, dest_dir, job_id, kind):
+        nonlocal current, peak
+        current += 1
+        peak = max(peak, current)
+        time.sleep(0.05)
+        current -= 1
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        video = dest_dir / f"{job_id}.mp4"
+        video.write_bytes(b"x")
+        from agent_core.youtube.download import YoutubeLibrary
+
+        return YoutubeLibrary(dest=dest_dir, files=[video], title="t", kind=kind)
+
+    downloader._fetch_video = slow  # type: ignore[method-assign]
+    url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+    await asyncio.gather(
+        downloader.fetch_video(url, tmp_path / "a", job_id="a"),
+        downloader.fetch_video(url, tmp_path / "b", job_id="b"),
+    )
+    assert peak == 1

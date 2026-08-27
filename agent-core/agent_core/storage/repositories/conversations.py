@@ -79,6 +79,13 @@ class ConversationRepository:
         )
         return int(value) if value is not None else None
 
+    async def users_with_chat(self) -> list[tuple[str, int]]:
+        """Users the scheduler can actually reach with an unsolicited message."""
+        rows = await self._db.fetch_all(
+            "SELECT user_id, last_chat_id FROM users WHERE last_chat_id IS NOT NULL"
+        )
+        return [(row["user_id"], int(row["last_chat_id"])) for row in rows]
+
     async def set_timezone(self, user_id: str, tz_name: str) -> None:
         ZoneInfo(tz_name)  # reject an invalid zone before persisting it
         await self._db.execute(

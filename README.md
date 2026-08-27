@@ -42,6 +42,7 @@ yes. See [ADR 0007](docs/adr/0007-tool-permission-model.md).
 | `telegram-gateway/` | Deploy unit A — the Telegram side |
 | `agent-core/` | Deploy unit B — everything else |
 | `gpu-transcriber/` | Deploy unit C — optional; whisper on a GPU host behind an HTTP API |
+| `handwriting-ocr/` | Deploy unit D — optional; Qwen3-VL handwriting OCR via Ollama on a GPU host |
 | `packages/pa-protocol/` | The wire protocol both sides share |
 | `tests/` | End-to-end tests that run both units together |
 | `deploy/` | systemd, launchd and nginx examples |
@@ -55,6 +56,10 @@ runtime.
 `gpu-transcriber/` is optional and shares nothing at all: the Core reaches it over plain HTTP on the
 LAN, and falls back to transcribing on its own CPU when it is absent. See
 [ADR 0008](docs/adr/0008-transcription-service-on-the-gpu-host.md).
+
+`handwriting-ocr/` is likewise optional and remote-only: photos are recognised by Qwen3-VL through
+Ollama on the GPU host, with no local fallback. See
+[ADR 0009](docs/adr/0009-remote-handwriting-ocr.md).
 
 ## Documentation
 

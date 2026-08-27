@@ -8,6 +8,7 @@ from .base import (
     AgentUnavailable,
     Provenance,
     ToolInvocation,
+    MessageAttribution,
 )
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "AgentResponse",
     "AgentUnavailable",
     "Provenance",
+    "MessageAttribution",
     "ToolInvocation",
 ]

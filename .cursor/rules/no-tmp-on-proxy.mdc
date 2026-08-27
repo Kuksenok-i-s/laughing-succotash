@@ -1,0 +1,10 @@
+---
+description: Never use /tmp on the Telegram gateway proxy VPS
+alwaysApply: true
+---
+
+# No /tmp on the proxy VPS
+
+The Telegram gateway runs on `root@45.148.60.90`. Never write to `/tmp` on that host: not secrets, not logs, not packages, not audio, not env files, not scratch copies.
+
+Use `/var/lib/telegram-gateway` (audio and Python tempfile: `/var/lib/telegram-gateway/tmp`). Set `TMPDIR` / `TEMP_DIR` there for anything that would otherwise use `/tmp`.

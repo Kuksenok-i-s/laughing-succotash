@@ -11,7 +11,9 @@ def test_defaults_need_only_a_token() -> None:
     settings = from_env({"GPU_STT_TOKEN": "t" * 40})
 
     assert settings.port == DEFAULT_PORT
+    assert settings.host == "0.0.0.0"
     assert settings.device == "cuda"
+    assert settings.idle_unload_seconds == 600.0
     assert settings.validate_runtime() == []
 
 
@@ -34,6 +36,7 @@ def test_the_environment_overrides_every_default(tmp_path: Path) -> None:
             "GPU_STT_WORK_DIR": str(tmp_path / "work"),
             "GPU_STT_MAX_UPLOAD_MB": "64",
             "GPU_STT_JOB_TTL_SECONDS": "120",
+            "GPU_STT_IDLE_UNLOAD_SECONDS": "90",
         }
     )
 
@@ -45,6 +48,7 @@ def test_the_environment_overrides_every_default(tmp_path: Path) -> None:
     assert settings.work_dir == tmp_path / "work"
     assert settings.max_upload_bytes == 64 * 1024 * 1024
     assert settings.job_ttl_seconds == 120.0
+    assert settings.idle_unload_seconds == 90.0
 
 
 def test_a_blank_value_falls_back_to_the_default() -> None:

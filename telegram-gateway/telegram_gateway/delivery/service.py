@@ -23,6 +23,8 @@ _PERMANENT = {
     errors.UNAUTHORIZED_USER,
     errors.AUDIO_TOO_LARGE,
     errors.AUDIO_TOO_LONG,
+    errors.IMAGE_TOO_LARGE,
+    errors.INVALID_IMAGE,
     errors.INVALID_PARAMS,
 }
 
@@ -145,6 +147,42 @@ class SubmissionService:
 
         await self._store.set_upload_status(upload.request_id, "uploading")
 
+        if upload.purpose == "ocr":
+            upload_id, chunk_size, resume_offset = await self._begin_image(upload)
+            commit_method = methods.IMAGE_COMMIT
+            commit_params = methods.ImageCommitParams(
+                upload_id=upload_id,
+                sha256=upload.sha256 or "",
+                total_size=upload.size,
+            )
+        else:
+            upload_id, chunk_size, resume_offset = await self._begin_audio(upload)
+            commit_method = methods.AUDIO_COMMIT
+            commit_params = methods.AudioCommitParams(
+                upload_id=upload_id,
+                sha256=upload.sha256 or "",
+                total_size=upload.size,
+            )
+
+        # The Core may have kept part of an interrupted upload; resume rather than resend.
+        await self._stream_file(
+            upload.file_path,
+            upload_id,
+            chunk_size=chunk_size or self._settings.upload_chunk_size,
+            start_offset=resume_offset,
+        )
+
+        await self._core.call(
+            commit_method,
+            methods.dump(commit_params),
+            timeout=120,
+        )
+
+        await self._store.set_upload_status(upload.request_id, "done")
+        # The Gateway keeps no media: once the Core has it, the temporary copy is deleted.
+        self._cleanup_file(upload.file_path)
+
+    async def _begin_audio(self, upload: PendingUpload) -> tuple[str, int, int]:
         begin = await self._core.call(
             methods.AUDIO_BEGIN,
             methods.dump(
@@ -157,35 +195,39 @@ class SubmissionService:
                     content_type=upload.content_type or "application/octet-stream",
                     size=upload.size,
                     duration_seconds=upload.duration_seconds,
-                    purpose=upload.purpose,
+                    purpose=upload.purpose,  # type: ignore[arg-type]
+                    sender=_actor(upload, "sender"),
+                    source=_source(upload),
                 )
             ),
         )
         parsed = methods.AudioBeginResult.model_validate(begin)
+        return parsed.upload_id, parsed.chunk_size, parsed.resume_offset
 
-        # The Core may have kept part of an interrupted upload; resume rather than resend.
-        await self._stream_file(
-            upload.file_path,
-            parsed.upload_id,
-            chunk_size=parsed.chunk_size or self._settings.upload_chunk_size,
-            start_offset=parsed.resume_offset,
-        )
-
-        await self._core.call(
-            methods.AUDIO_COMMIT,
+    async def _begin_image(self, upload: PendingUpload) -> tuple[str, int, int]:
+        begin = await self._core.call(
+            methods.IMAGE_BEGIN,
             methods.dump(
-                methods.AudioCommitParams(
-                    upload_id=parsed.upload_id,
-                    sha256=upload.sha256 or "",
-                    total_size=upload.size,
+                methods.ImageBeginParams(
+                    request_id=upload.request_id,
+                    user_id=upload.user_id,
+                    chat_id=upload.chat_id,
+                    message_id=upload.message_id,
+                    filename=upload.filename,
+                    content_type=upload.content_type or "application/octet-stream",
+                    size=upload.size,
+                    purpose="ocr",
+                    caption=upload.caption,
+                    album_id=upload.album_id,
+                    part_index=upload.part_index,
+                    part_count=upload.part_count,
+                    sender=_actor(upload, "sender"),
+                    source=_source(upload),
                 )
             ),
-            timeout=120,
         )
-
-        await self._store.set_upload_status(upload.request_id, "done")
-        # The Gateway keeps no audio: once the Core has it, the temporary copy is deleted.
-        self._cleanup_file(upload.file_path)
+        parsed = methods.ImageBeginResult.model_validate(begin)
+        return parsed.upload_id, parsed.chunk_size, parsed.resume_offset
 
     async def _stream_file(
         self, path: Path, upload_id: str, *, chunk_size: int, start_offset: int = 0
@@ -232,3 +274,25 @@ class SubmissionService:
             path.unlink(missing_ok=True)
         except OSError:
             log.debug("could not delete temp file %s", path, exc_info=True)
+
+
+def _actor(upload: PendingUpload, key: str) -> methods.TelegramActor | None:
+    raw = (upload.attribution or {}).get(key)
+    if not raw:
+        return None
+    try:
+        return methods.TelegramActor.model_validate(raw)
+    except Exception:
+        log.debug("dropping malformed %s attribution on upload %s", key, upload.request_id)
+        return None
+
+
+def _source(upload: PendingUpload) -> methods.MessageSource | None:
+    raw = (upload.attribution or {}).get("source")
+    if not raw:
+        return None
+    try:
+        return methods.MessageSource.model_validate(raw)
+    except Exception:
+        log.debug("dropping malformed source attribution on upload %s", upload.request_id)
+        return None

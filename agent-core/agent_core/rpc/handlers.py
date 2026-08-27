@@ -24,13 +24,16 @@ log = logging.getLogger(__name__)
 
 
 class CoreHandlers:
-    def __init__(self, settings, repos, assistant, uploads, confirmations, scheduler) -> None:
+    def __init__(
+        self, settings, repos, assistant, uploads, confirmations, scheduler, *, ocr=None
+    ) -> None:
         self._settings = settings
         self._repos = repos
         self._assistant = assistant
         self._uploads = uploads
         self._confirmations = confirmations
         self._scheduler = scheduler
+        self._ocr = ocr
 
     def as_map(self) -> dict[str, Any]:
         return {
@@ -38,6 +41,9 @@ class CoreHandlers:
             methods.AUDIO_BEGIN: self.audio_begin,
             methods.AUDIO_COMMIT: self.audio_commit,
             methods.AUDIO_ABORT: self.audio_abort,
+            methods.IMAGE_BEGIN: self.image_begin,
+            methods.IMAGE_COMMIT: self.image_commit,
+            methods.IMAGE_ABORT: self.image_abort,
             methods.JOB_CANCEL: self.job_cancel,
             methods.CONFIRMATION_RESOLVE: self.confirmation_resolve,
             methods.SESSION_RESET: self.session_reset,
@@ -57,7 +63,10 @@ class CoreHandlers:
         params = _parse(methods.AssistantSubmitParams, raw)
         self._authorize(params.user_id)
 
-        await self._repos.conversations.ensure_user(params.user_id)
+        await self._repos.conversations.ensure_user(
+            params.user_id,
+            display_name=params.sender.name if params.sender else None,
+        )
         # Remembered so a reminder created now can still be delivered in three hours' time.
         await self._repos.conversations.remember_chat(params.user_id, params.chat_id)
 
@@ -70,7 +79,10 @@ class CoreHandlers:
         params = _parse(methods.AudioBeginParams, raw)
         self._authorize(params.user_id)
 
-        await self._repos.conversations.ensure_user(params.user_id)
+        await self._repos.conversations.ensure_user(
+            params.user_id,
+            display_name=params.sender.name if params.sender else None,
+        )
         await self._repos.conversations.remember_chat(params.user_id, params.chat_id)
 
         if (
@@ -90,6 +102,7 @@ class CoreHandlers:
                 size=params.size,
                 duration_seconds=params.duration_seconds,
                 purpose=params.purpose,
+                attribution=_attribution_blob(params),
             )
         except AudioUploadError as exc:
             if exc.code == "too_large":
@@ -124,6 +137,83 @@ class CoreHandlers:
 
     async def audio_abort(self, raw: dict[str, Any]) -> dict[str, Any]:
         params = _parse(methods.AudioAbortParams, raw)
+        await self._uploads.abort(params.upload_id, params.reason)
+        return {}
+
+    # ---- image -------------------------------------------------------------
+
+    async def image_begin(self, raw: dict[str, Any]) -> dict[str, Any]:
+        params = _parse(methods.ImageBeginParams, raw)
+        self._authorize(params.user_id)
+
+        await self._repos.conversations.ensure_user(
+            params.user_id,
+            display_name=params.sender.name if params.sender else None,
+        )
+        await self._repos.conversations.remember_chat(params.user_id, params.chat_id)
+
+        mime = (params.content_type or "").split(";")[0].strip().lower()
+        if mime and not mime.startswith("image/") and mime != "application/octet-stream":
+            raise RpcError(errors.INVALID_IMAGE, "invalid_image")
+        if params.size > self._settings.max_image_bytes:
+            raise RpcError(errors.IMAGE_TOO_LARGE, "image_too_large")
+
+        try:
+            upload, resume_offset = await self._uploads.begin(
+                request_id=params.request_id,
+                user_id=params.user_id,
+                chat_id=params.chat_id,
+                message_id=params.message_id,
+                filename=params.filename,
+                content_type=params.content_type,
+                size=params.size,
+                duration_seconds=None,
+                purpose=params.purpose,
+                caption=params.caption,
+                attribution=_attribution_blob(params),
+                album_id=params.album_id,
+                part_index=params.part_index,
+                part_count=params.part_count,
+            )
+        except AudioUploadError as exc:
+            if exc.code == "too_large":
+                raise RpcError(errors.IMAGE_TOO_LARGE, "image_too_large") from exc
+            raise RpcError(errors.INTERNAL_ERROR, "internal_error") from exc
+
+        return methods.dump(
+            methods.ImageBeginResult(
+                upload_id=upload.upload_id,
+                chunk_size=256 * 1024,
+                resume_offset=resume_offset,
+            )
+        )
+
+    async def image_commit(self, raw: dict[str, Any]) -> dict[str, Any]:
+        params = _parse(methods.ImageCommitParams, raw)
+        try:
+            upload = await self._uploads.commit(
+                params.upload_id, sha256=params.sha256, total_size=params.total_size
+            )
+        except AudioUploadError as exc:
+            code = {
+                "unknown_upload": errors.UNKNOWN_UPLOAD,
+                "size_mismatch": errors.UPLOAD_INCOMPLETE,
+                "checksum_mismatch": errors.UPLOAD_INCOMPLETE,
+            }.get(exc.code, errors.INTERNAL_ERROR)
+            raise RpcError(code, errors.NAMES.get(code, "upload_failed")) from exc
+
+        self._authorize(upload.user_id)
+
+        if upload.album_id and upload.part_count and upload.part_count > 1:
+            job_id = await self._assistant.maybe_start_image_album(upload)
+        else:
+            job_id = await self._assistant.start_image_job(upload)
+        return methods.dump(
+            methods.AcceptedResult(job_id=job_id or upload.album_id or upload.upload_id)
+        )
+
+    async def image_abort(self, raw: dict[str, Any]) -> dict[str, Any]:
+        params = _parse(methods.ImageAbortParams, raw)
         await self._uploads.abort(params.upload_id, params.reason)
         return {}
 
@@ -168,3 +258,14 @@ def _parse(model, raw: dict[str, Any]):
         raise RpcError(
             errors.INVALID_PARAMS, "invalid_params", {"detail": exc.errors(include_url=False)[:3]}
         ) from exc
+
+
+def _attribution_blob(params) -> dict[str, Any] | None:
+    if params.sender is None and params.source is None:
+        return None
+    blob: dict[str, Any] = {}
+    if params.sender is not None:
+        blob["sender"] = methods.dump(params.sender)
+    if params.source is not None:
+        blob["source"] = methods.dump(params.source)
+    return blob

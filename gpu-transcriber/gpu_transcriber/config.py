@@ -37,6 +37,8 @@ class Settings:
     # abandoned hour of audio does not outlive the night.
     job_ttl_seconds: float = 6 * 3600.0
     sweep_interval_seconds: float = 60.0
+    # Drop weights after this much quiet so OCR can use the same card. 0 disables.
+    idle_unload_seconds: float = 600.0
     max_upload_mb: int = 512
     upload_chunk_size: int = 1024 * 1024
 
@@ -93,6 +95,9 @@ def from_env(env: Mapping[str, str] | None = None) -> Settings:
         job_ttl_seconds=seconds("JOB_TTL_SECONDS", defaults.job_ttl_seconds),
         sweep_interval_seconds=seconds(
             "SWEEP_INTERVAL_SECONDS", defaults.sweep_interval_seconds
+        ),
+        idle_unload_seconds=seconds(
+            "IDLE_UNLOAD_SECONDS", defaults.idle_unload_seconds
         ),
         max_upload_mb=number("MAX_UPLOAD_MB", defaults.max_upload_mb),
         upload_chunk_size=number("UPLOAD_CHUNK_SIZE", defaults.upload_chunk_size),

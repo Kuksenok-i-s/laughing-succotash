@@ -187,9 +187,17 @@ class Upload:
     purpose: str
     temp_path: Path
     status: str
+    caption: str | None = None
+    attribution: dict | None = None
+    album_id: str | None = None
+    part_index: int | None = None
+    part_count: int | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Upload:
+        keys = row.keys()
+        raw = row["attribution"] if "attribution" in keys else None
+        attribution = json.loads(raw) if raw else None
         return cls(
             upload_id=row["upload_id"],
             request_id=row["request_id"],
@@ -204,6 +212,11 @@ class Upload:
             purpose=row["purpose"],
             temp_path=Path(row["temp_path"]),
             status=row["status"],
+            caption=row["caption"] if "caption" in keys else None,
+            attribution=attribution,
+            album_id=row["album_id"] if "album_id" in keys else None,
+            part_index=row["part_index"] if "part_index" in keys else None,
+            part_count=row["part_count"] if "part_count" in keys else None,
         )
 
 
@@ -224,22 +237,31 @@ class UploadRepository:
         message_id: int | None = None,
         duration_seconds: float | None = None,
         purpose: str = "assistant",
+        caption: str | None = None,
+        attribution: dict[str, Any] | None = None,
+        album_id: str | None = None,
+        part_index: int | None = None,
+        part_count: int | None = None,
     ) -> Upload:
         upload_id = new_ulid()
         now = utcnow().isoformat()
+        encoded = json.dumps(attribution, ensure_ascii=False) if attribution else None
         await self._db.execute(
             "INSERT INTO uploads(upload_id, request_id, user_id, chat_id, message_id, filename, "
-            "content_type, declared_size, received_size, duration_seconds, purpose, temp_path, "
-            "status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'open', ?, ?)",
+            "content_type, declared_size, received_size, duration_seconds, purpose, caption, "
+            "attribution, album_id, part_index, part_count, temp_path, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
             (
                 upload_id, request_id, user_id, chat_id, message_id, filename, content_type,
-                declared_size, duration_seconds, purpose, str(temp_path), now, now,
+                declared_size, duration_seconds, purpose, caption, encoded,
+                album_id, part_index, part_count, str(temp_path),
+                now, now,
             ),
         )
         return Upload(
             upload_id, request_id, user_id, chat_id, message_id, filename, content_type,
-            declared_size, 0, duration_seconds, purpose, temp_path, "open",
+            declared_size, 0, duration_seconds, purpose, temp_path, "open", caption,
+            attribution, album_id, part_index, part_count,
         )
 
     async def get(self, upload_id: str) -> Upload | None:
@@ -253,6 +275,14 @@ class UploadRepository:
             (request_id,),
         )
         return Upload.from_row(row) if row else None
+
+    async def list_committed_album(self, album_id: str) -> list[Upload]:
+        rows = await self._db.fetch_all(
+            "SELECT * FROM uploads WHERE album_id = ? AND status = 'complete' "
+            "ORDER BY part_index ASC, created_at ASC",
+            (album_id,),
+        )
+        return [Upload.from_row(row) for row in rows]
 
     async def record_progress(self, upload_id: str, received_size: int) -> None:
         await self._db.execute(

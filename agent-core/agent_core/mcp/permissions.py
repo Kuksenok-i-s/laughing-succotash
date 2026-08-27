@@ -62,6 +62,8 @@ TIERS: dict[str, Tier] = {
     "note_search": Tier.READ,
     "note_get": Tier.READ,
     "memory_search": Tier.READ,
+    "journal_search": Tier.READ,
+    "journal_month": Tier.READ,
     "contact_search": Tier.READ,
     "contact_get": Tier.READ,
     "reminder_list": Tier.READ,
@@ -88,6 +90,8 @@ TIERS: dict[str, Tier] = {
     "timer_cancel": Tier.SAFE_WRITE,
     "reminder_cancel": Tier.SAFE_WRITE,
     "memory_remember": Tier.SAFE_WRITE,
+    "contact_create": Tier.SAFE_WRITE,
+    "contact_update": Tier.SAFE_WRITE,
     # --- dangerous ---
     "calendar_delete": Tier.DANGEROUS,
     "task_delete": Tier.DANGEROUS,
@@ -153,6 +157,13 @@ def describe_action(tool_name: str, arguments: dict[str, Any]) -> str:
             return f"Запомнить надолго: «{(arguments.get('content') or '')[:150]}»?"
         case "memory_forget":
             return f"Забыть запись {arguments.get('memory_id')}?"
+        case "contact_create":
+            return f"Добавить контакт «{arguments.get('display_name', '')}»?"
+        case "contact_update":
+            return (
+                f"Изменить контакт "
+                f"«{arguments.get('display_name') or arguments.get('contact_id')}»?"
+            )
         case "timer_create":
             return f"Поставить таймер на {arguments.get('duration_seconds', 0) // 60} мин?"
         case _:

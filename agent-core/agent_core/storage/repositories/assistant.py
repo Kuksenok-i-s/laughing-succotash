@@ -597,23 +597,66 @@ class ContactRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    async def create(
+        self, *, user_id: str, display_name: str, aliases: list[str] | None = None,
+        emails: list[str] | None = None, phones: list[str] | None = None,
+        note: str | None = None, operation_id: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        contact_id = new_ulid()
+        now = utcnow().isoformat()
+
+        def run(connection: sqlite3.Connection) -> tuple[sqlite3.Row, bool]:
+            if operation_id:
+                existing = connection.execute(
+                    "SELECT * FROM contacts WHERE operation_id = ?", (operation_id,)
+                ).fetchone()
+                if existing is not None:
+                    return existing, True
+            connection.execute(
+                "INSERT INTO contacts(contact_id, user_id, display_name, aliases, emails, phones, "
+                "note, operation_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (contact_id, user_id, display_name, _json_list(aliases), _json_list(emails),
+                 _json_list(phones), note, operation_id, now, now),
+            )
+            return connection.execute(
+                "SELECT * FROM contacts WHERE contact_id = ?", (contact_id,)
+            ).fetchone(), False
+
+        row, duplicate = await self._db.transaction(run)
+        return self._public(row), duplicate
+
     async def upsert(
         self, *, user_id: str, display_name: str, aliases: list[str] | None = None,
         emails: list[str] | None = None, phones: list[str] | None = None,
         note: str | None = None,
     ) -> dict[str, Any]:
-        contact_id = new_ulid()
-        now = utcnow().isoformat()
+        contact, _ = await self.create(
+            user_id=user_id, display_name=display_name, aliases=aliases,
+            emails=emails, phones=phones, note=note,
+        )
+        return contact
+
+    async def update(
+        self, contact_id: str, user_id: str, *, display_name: str | None = None,
+        aliases: list[str] | None = None, emails: list[str] | None = None,
+        phones: list[str] | None = None, note: str | None = None,
+    ) -> dict[str, Any] | None:
+        current = await self.get(contact_id, user_id)
+        if current is None:
+            return None
         await self._db.execute(
-            "INSERT INTO contacts(contact_id, user_id, display_name, aliases, emails, phones, "
-            "note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (contact_id, user_id, display_name, _json_list(aliases), _json_list(emails),
-             _json_list(phones), note, now, now),
+            "UPDATE contacts SET display_name = ?, aliases = ?, emails = ?, phones = ?, "
+            "note = ?, updated_at = ? WHERE contact_id = ? AND user_id = ?",
+            (
+                display_name if display_name is not None else current["display_name"],
+                _json_list(aliases if aliases is not None else current["aliases"]),
+                _json_list(emails if emails is not None else current["emails"]),
+                _json_list(phones if phones is not None else current["phones"]),
+                note if note is not None else current["note"],
+                utcnow().isoformat(), contact_id, user_id,
+            ),
         )
-        row = await self._db.fetch_one(
-            "SELECT * FROM contacts WHERE contact_id = ?", (contact_id,)
-        )
-        return self._public(row)
+        return await self.get(contact_id, user_id)
 
     async def search(self, user_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """Substring match across name and aliases.

@@ -37,6 +37,9 @@ ASSISTANT_SUBMIT = "assistant.submit"
 AUDIO_BEGIN = "audio.begin"
 AUDIO_COMMIT = "audio.commit"
 AUDIO_ABORT = "audio.abort"
+IMAGE_BEGIN = "image.begin"
+IMAGE_COMMIT = "image.commit"
+IMAGE_ABORT = "image.abort"
 JOB_CANCEL = "job.cancel"
 CONFIRMATION_RESOLVE = "confirmation.resolve"
 SESSION_RESET = "session.reset"
@@ -49,6 +52,9 @@ Stage = Literal[
     # Same work as `transcribing`, but the GPU host was unusable and the Core fell back to local
     # CPU whisper. A separate stage because the user needs to know why the wait grew.
     "transcribing_cpu",
+    "recognizing",
+    "recognizing_album",
+    "structuring",
     "summarizing",
     "agent",
     "executing_tool",
@@ -58,6 +64,7 @@ Stage = Literal[
 
 SubmitKind = Literal["text", "command", "transcribe_request"]
 AudioPurpose = Literal["assistant", "transcribe_only"]
+ImagePurpose = Literal["ocr"]
 
 
 # --- handshake -----------------------------------------------------------
@@ -85,6 +92,34 @@ class ReplyContext(_Payload):
     has_audio: bool = False
 
 
+ActorKind = Literal["user", "hidden_user", "chat", "channel"]
+
+
+class TelegramActor(_Payload):
+    """A person or chat Telegram attributed content to."""
+
+    kind: ActorKind = "user"
+    name: str | None = None
+    username: str | None = None
+    telegram_user_id: str | None = None
+    chat_id: int | None = None
+    chat_title: str | None = None
+
+
+class MessageSource(_Payload):
+    """Who originally produced the content, as Telegram reported it.
+
+    ``user_id`` on the parent payload is always the allowlisted person talking to the bot.
+    ``author`` is that same person when the message is original, and the original writer when
+    the update is a forward.
+    """
+
+    forwarded: bool = False
+    author: TelegramActor
+    date: datetime | None = None
+    signature: str | None = None
+
+
 class AssistantSubmitParams(_Payload):
     request_id: str
     user_id: str
@@ -96,6 +131,8 @@ class AssistantSubmitParams(_Payload):
     reply_to: ReplyContext | None = None
     upload_id: str | None = None
     client_time: datetime | None = None
+    sender: TelegramActor | None = None
+    source: MessageSource | None = None
 
 
 class AcceptedResult(_Payload):
@@ -114,6 +151,8 @@ class AudioBeginParams(_Payload):
     size: int
     duration_seconds: float | None = None
     purpose: AudioPurpose = "assistant"
+    sender: TelegramActor | None = None
+    source: MessageSource | None = None
 
 
 class AudioBeginResult(_Payload):
@@ -129,6 +168,41 @@ class AudioCommitParams(_Payload):
 
 
 class AudioAbortParams(_Payload):
+    upload_id: str
+    reason: str | None = None
+
+
+class ImageBeginParams(_Payload):
+    request_id: str
+    user_id: str
+    chat_id: int
+    message_id: int
+    filename: str
+    content_type: str
+    size: int
+    purpose: ImagePurpose = "ocr"
+    caption: str | None = None
+    # Telegram album: shared id, 0-based index, total parts. All null for a single photo.
+    album_id: str | None = None
+    part_index: int | None = None
+    part_count: int | None = None
+    sender: TelegramActor | None = None
+    source: MessageSource | None = None
+
+
+class ImageBeginResult(_Payload):
+    upload_id: str
+    chunk_size: int
+    resume_offset: int = 0
+
+
+class ImageCommitParams(_Payload):
+    upload_id: str
+    sha256: str
+    total_size: int
+
+
+class ImageAbortParams(_Payload):
     upload_id: str
     reason: str | None = None
 

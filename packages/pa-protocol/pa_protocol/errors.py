@@ -33,6 +33,11 @@ AGENT_FAILED = -32031
 STT_UNAVAILABLE = -32040
 STT_FAILED = -32041
 
+OCR_UNAVAILABLE = -32042
+OCR_FAILED = -32043
+IMAGE_TOO_LARGE = -32044
+INVALID_IMAGE = -32045
+
 TELEGRAM_SEND_FAILED = -32050
 TELEGRAM_BLOCKED = -32051
 
@@ -56,6 +61,10 @@ NAMES = {
     AGENT_FAILED: "agent_failed",
     STT_UNAVAILABLE: "stt_unavailable",
     STT_FAILED: "stt_failed",
+    OCR_UNAVAILABLE: "ocr_unavailable",
+    OCR_FAILED: "ocr_failed",
+    IMAGE_TOO_LARGE: "image_too_large",
+    INVALID_IMAGE: "invalid_image",
     TELEGRAM_SEND_FAILED: "telegram_send_failed",
     TELEGRAM_BLOCKED: "telegram_blocked",
 }
@@ -67,6 +76,7 @@ RETRYABLE = frozenset(
         UPLOAD_INCOMPLETE,
         AGENT_UNAVAILABLE,
         STT_UNAVAILABLE,
+        OCR_UNAVAILABLE,
         TELEGRAM_SEND_FAILED,
     }
 )

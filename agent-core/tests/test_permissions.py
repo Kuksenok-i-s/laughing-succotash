@@ -19,7 +19,8 @@ TRANSCRIPT = ctx(Provenance.UNTRUSTED_CONTENT)
 
 @pytest.mark.parametrize(
     "tool",
-    ["calendar_list", "task_list", "note_search", "memory_search", "contact_search",
+    ["calendar_list", "task_list", "note_search", "memory_search", "journal_search",
+     "contact_search",
      "system_status", "web_search", "calendar_find_free_slots"],
 )
 def test_read_tools_run_without_asking(tool: str) -> None:
@@ -29,7 +30,8 @@ def test_read_tools_run_without_asking(tool: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "tool", ["reminder_create", "task_create", "note_create", "calendar_create"]
+    "tool", ["reminder_create", "task_create", "note_create", "calendar_create",
+             "contact_create"]
 )
 def test_safe_writes_depend_on_who_asked(tool: str) -> None:
     assert decide(tool, DIRECT) is Decision.ALLOW
@@ -70,6 +72,9 @@ def test_confirmation_prompt_shows_the_actual_arguments() -> None:
     assert "Созвон" in text
     assert "24.08 15:00" in text
     assert "24.08 16:00" in text
+    assert "Саша Иванов" in permissions.describe_action(
+        "contact_create", {"display_name": "Саша Иванов"}
+    )
 
 
 def test_confirmation_prompt_for_unknown_tool_is_still_specific() -> None:

@@ -34,7 +34,11 @@ class Service:
             vad_filter=settings.vad_filter,
         )
         self._app = TranscriptionApp(settings, self._store, self._engine)
-        self._worker = TranscriptionWorker(self._store, self._engine)
+        self._worker = TranscriptionWorker(
+            self._store,
+            self._engine,
+            idle_unload_seconds=settings.idle_unload_seconds,
+        )
         self._server: TranscriptionServer | None = None
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()

@@ -19,6 +19,8 @@ from aiogram.types import (
     Document,
     File,
     Message,
+    MessageOriginUser,
+    PhotoSize,
     Update,
     User,
     Voice,
@@ -143,8 +145,31 @@ async def test_a_text_message_is_queued_for_the_core(wired, bot, store) -> None:
     assert len(pending) == 1
     assert pending[0].payload["text"] == "что у меня завтра?"
     assert pending[0].user_id == "tg:1"
+    assert pending[0].payload["sender"]["name"] == "Илья"
+    assert pending[0].payload["source"]["forwarded"] is False
+    assert pending[0].payload["source"]["author"]["telegram_user_id"] == "tg:1"
     # Persisted first, then the submitter is woken: an outage cannot lose the message.
     assert submissions.nudges == 1
+
+
+async def test_a_forwarded_message_carries_the_original_author(wired, bot, store) -> None:
+    dispatcher, _core, _ = wired
+    origin = MessageOriginUser(
+        type="user",
+        date=datetime.now(timezone.utc),
+        sender_user=User(id=42, is_bot=False, first_name="Маша", username="masha"),
+    )
+
+    await feed(
+        dispatcher, bot,
+        message=_message(text="поставь встречу завтра", forward_origin=origin),
+    )
+
+    payload = (await store.pending_requests())[0].payload
+    assert payload["sender"]["telegram_user_id"] == "tg:1"
+    assert payload["source"]["forwarded"] is True
+    assert payload["source"]["author"]["name"] == "Маша"
+    assert payload["source"]["author"]["telegram_user_id"] == "tg:42"
 
 
 async def test_the_handler_does_not_wait_for_an_answer(wired, bot) -> None:
@@ -217,6 +242,16 @@ async def test_cancel_is_queued_like_any_other_command(wired, bot, store) -> Non
 
     pending = await store.pending_requests()
     assert pending[0].payload["command"] == "/cancel"
+    assert pending[0].payload["kind"] == "command"
+
+
+async def test_journal_is_queued_like_any_other_command(wired, bot, store) -> None:
+    dispatcher, _core, _ = wired
+
+    await feed(dispatcher, bot, message=_message(text="/journal"))
+
+    pending = await store.pending_requests()
+    assert pending[0].payload["command"] == "/journal"
     assert pending[0].payload["kind"] == "command"
 
 
@@ -325,6 +360,30 @@ async def test_a_voice_note_is_downloaded_and_queued(wired, bot, store) -> None:
     assert submissions.nudges == 1
 
 
+async def test_a_forwarded_voice_note_keeps_the_original_author(wired, bot, store) -> None:
+    dispatcher, _core, _ = wired
+    origin = MessageOriginUser(
+        type="user",
+        date=datetime.now(timezone.utc),
+        sender_user=User(id=42, is_bot=False, first_name="Маша"),
+    )
+    message = _message(
+        message_id=5,
+        bot=bot,
+        voice=Voice(
+            file_id="voice-1", file_unique_id="v1", duration=12, mime_type="audio/ogg",
+            file_size=len(b"opus"),
+        ),
+        forward_origin=origin,
+    )
+
+    await feed(dispatcher, bot, message=message)
+
+    upload = (await store.pending_uploads())[0]
+    assert upload.attribution["source"]["forwarded"] is True
+    assert upload.attribution["source"]["author"]["name"] == "Маша"
+
+
 async def test_an_audio_file_is_accepted_too(wired, bot, store) -> None:
     dispatcher, _core, _ = wired
     message = _message(
@@ -356,6 +415,126 @@ async def test_a_pdf_is_not_pushed_through_whisper(wired, bot, store) -> None:
     await feed(dispatcher, bot, message=message)
 
     assert await store.pending_uploads() == []
+
+
+async def test_a_photo_is_queued_for_ocr(wired, bot, store) -> None:
+    dispatcher, _core, submissions = wired
+    bot._audio = b"jpeg-bytes"  # noqa: SLF001 — download payload reused by HandlerBot
+    message = _message(
+        message_id=20,
+        bot=bot,
+        photo=[
+            PhotoSize(
+                file_id="ph-small", file_unique_id="ps", width=100, height=100, file_size=10
+            ),
+            PhotoSize(
+                file_id="ph-large", file_unique_id="pl", width=800, height=600, file_size=100
+            ),
+        ],
+        caption="с холодильника",
+    )
+
+    await feed(dispatcher, bot, message=message)
+
+    uploads = await store.pending_uploads()
+    assert len(uploads) == 1
+    assert uploads[0].purpose == "ocr"
+    assert uploads[0].caption == "с холодильника"
+    assert uploads[0].album_id is None
+    assert uploads[0].file_path.read_bytes() == b"jpeg-bytes"
+    assert submissions.nudges == 1
+
+
+async def test_a_photo_album_is_buffered_then_flushed_together(
+    wired, bot, store, monkeypatch
+) -> None:
+    import asyncio
+
+    from telegram_gateway.telegram import handlers as handlers_mod
+
+    monkeypatch.setattr(handlers_mod, "_ALBUM_DEBOUNCE_SECONDS", 0.05)
+    dispatcher, _core, submissions = wired
+    bot._audio = b"jpeg-bytes"  # noqa: SLF001
+
+    for index, message_id in enumerate((30, 31, 32)):
+        message = _message(
+            message_id=message_id,
+            bot=bot,
+            photo=[
+                PhotoSize(
+                    file_id=f"ph-{index}",
+                    file_unique_id=f"u{index}",
+                    width=400,
+                    height=400,
+                    file_size=20,
+                )
+            ],
+            media_group_id="album-xyz",
+            caption="общая подпись" if index == 0 else None,
+        )
+        await feed(dispatcher, bot, message=message)
+
+    assert await store.pending_uploads() == []
+    assert submissions.nudges == 0
+
+    await asyncio.sleep(0.2)
+
+    uploads = sorted(await store.pending_uploads(), key=lambda item: item.part_index or 0)
+    assert len(uploads) == 3
+    album_ids = {upload.album_id for upload in uploads}
+    assert len(album_ids) == 1
+    assert None not in album_ids
+    assert [upload.part_index for upload in uploads] == [0, 1, 2]
+    assert all(upload.part_count == 3 for upload in uploads)
+    assert uploads[0].caption == "общая подпись"
+    assert submissions.nudges == 3
+
+
+async def test_an_image_document_is_queued_for_ocr(wired, bot, store) -> None:
+    dispatcher, _core, _ = wired
+    bot._audio = b"png-bytes"  # noqa: SLF001
+    message = _message(
+        message_id=21,
+        bot=bot,
+        document=Document(
+            file_id="img-1",
+            file_unique_id="i1",
+            mime_type="image/png",
+            file_name="note.png",
+            file_size=9,
+        ),
+    )
+
+    await feed(dispatcher, bot, message=message)
+
+    uploads = await store.pending_uploads()
+    assert uploads[0].purpose == "ocr"
+    assert uploads[0].filename == "note.png"
+
+
+async def test_ocr_reply_command_requeues_a_photo(wired, bot, store) -> None:
+    dispatcher, _core, submissions = wired
+    bot._audio = b"jpeg-bytes"  # noqa: SLF001
+    photo = _message(
+        message_id=22,
+        bot=bot,
+        photo=[
+            PhotoSize(file_id="ph", file_unique_id="p", width=400, height=400, file_size=20)
+        ],
+    )
+    command = _message(
+        message_id=23,
+        bot=bot,
+        text="/ocr",
+        reply_to_message=photo,
+    )
+
+    await feed(dispatcher, bot, message=command)
+
+    uploads = await store.pending_uploads()
+    assert len(uploads) == 1
+    assert uploads[0].purpose == "ocr"
+    assert submissions.nudges == 1
 
 
 async def test_a_file_over_the_limit_is_refused_before_downloading(

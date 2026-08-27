@@ -121,6 +121,7 @@ class FakeBackend:
         self.reply = reply
         self.on_prompt = on_prompt
         self.prompts: list[tuple[str, str]] = []
+        self.contexts: list = []
         self.sessions: list[str] = []
         self.cancelled: list[str] = []
         self.started = False
@@ -151,6 +152,8 @@ class FakeBackend:
 
     async def send_message(self, session_id, message, context=None, *, on_progress=None):
         self.prompts.append((session_id, message))
+        if context is not None:
+            self.contexts.append(context)
         if on_progress is not None:
             await on_progress("executing_tool", "fake tool")
         if self.on_prompt is not None:

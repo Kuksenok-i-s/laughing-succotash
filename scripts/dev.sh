@@ -8,5 +8,5 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec env -u ARGV0 -u APPDIR -u APPIMAGE -u LD_LIBRARY_PATH -u OWD \
-    PYTHONPATH="${ROOT}/agent-core:${ROOT}/telegram-gateway:${ROOT}/gpu-transcriber${PYTHONPATH:+:${PYTHONPATH}}" \
+    PYTHONPATH="${ROOT}/agent-core:${ROOT}/telegram-gateway:${ROOT}/gpu-transcriber:${ROOT}/handwriting-ocr${PYTHONPATH:+:${PYTHONPATH}}" \
     "${ROOT}/.venv/bin/python" "$@"

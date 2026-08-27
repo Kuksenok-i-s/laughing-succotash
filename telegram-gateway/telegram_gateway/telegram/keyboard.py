@@ -22,6 +22,7 @@ BUTTON_COMMANDS: dict[str, str] = {
     "Отмена": "cancel",
     "Напоминания": "reminders",
     "Задачи": "tasks",
+    "Дневник": "journal",
     "Статус": "status",
     "Справка": "help",
 }
@@ -32,6 +33,7 @@ BOT_COMMANDS = [
     BotCommand(command="status", description="Состояние системы"),
     BotCommand(command="reminders", description="Список напоминаний"),
     BotCommand(command="tasks", description="Список задач"),
+    BotCommand(command="journal", description="Дневник за сегодня"),
     BotCommand(command="transcribe", description="Только расшифровка (ответом на аудио)"),
     BotCommand(command="keyboard", description="Показать кнопки"),
     BotCommand(command="help", description="Справка"),
@@ -43,7 +45,8 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="Новый разговор"), KeyboardButton(text="Отмена")],
             [KeyboardButton(text="Напоминания"), KeyboardButton(text="Задачи")],
-            [KeyboardButton(text="Статус"), KeyboardButton(text="Справка")],
+            [KeyboardButton(text="Дневник"), KeyboardButton(text="Статус")],
+            [KeyboardButton(text="Справка")],
             [KeyboardButton(text=HIDE)],
         ],
         resize_keyboard=True,

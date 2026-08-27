@@ -1,8 +1,7 @@
 # GPU transcriber
 
-Transcription service for the machine with the GPU. Holds one faster-whisper model in memory and
-answers a small HTTP API, so the Core can hand over a recording, watch a percentage move, and
-collect a transcript.
+Transcription service for the machine with the GPU. Loads one faster-whisper model, answers a
+small HTTP API, and drops the weights after ten idle minutes so OCR can share the card.
 
 It exists because the alternative did not work: transcription used to be a set of one-shot SSH
 commands per recording, with liveness guessed from `pgrep` and progress copied back as a file. See
@@ -20,7 +19,7 @@ gpu_transcriber/
 ├── server.py          five endpoints on ThreadingHTTPServer
 ├── jobs.py            job registry, audio spool, queue, TTL sweep
 ├── worker.py          the single thread that owns the GPU
-└── engine.py          faster-whisper, loaded once
+└── engine.py          faster-whisper, loaded lazily and dropped after idle
 ```
 
 Standard library only, apart from `faster-whisper` itself. The virtualenv on the GPU host runs a
@@ -69,11 +68,11 @@ Deployment as a user systemd unit is in [`../docs/operations.md`](../docs/operat
 
 ## Notes worth knowing
 
-**The model loads after the port opens.** On an RTX 4080 that took 85 seconds reading the weights
-off disk and 2 seconds on a restart while they were still in the page cache. Until the model is in
-memory `/health` answers `model_loaded: false` and jobs sit in the queue. Refusing connections
-instead would send the Core to its CPU fallback for as long as that process lives, which is a far
-worse trade.
+**The model loads after the port opens, and unloads after ten idle minutes.** Until the weights
+are in memory `/health` answers `model_loaded: false` and jobs sit in the queue. Refusing
+connections instead would send the Core to its CPU fallback for as long as that process lives.
+`GPU_STT_IDLE_UNLOAD_SECONDS=600` (0 disables) drops `large-v3` so OCR can use the same card; the
+next job reloads it.
 
 **The registry is in memory.** A restart loses jobs in flight; the Core sees a `404`, raises
 `SttError` and transcribes on the CPU. A durable queue would instead replay an hour of GPU work that

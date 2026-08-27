@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS pending_uploads (
     size         INTEGER NOT NULL,
     duration_seconds REAL,
     purpose      TEXT NOT NULL DEFAULT 'assistant',
+    caption      TEXT,
+    attribution  TEXT,
+    album_id     TEXT,
+    part_index   INTEGER,
+    part_count   INTEGER,
     sha256       TEXT,
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending|uploading|done|failed
     attempts     INTEGER NOT NULL DEFAULT 0,
@@ -134,6 +139,24 @@ class Database:
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute("PRAGMA busy_timeout=30000")
         connection.executescript(SCHEMA)
+        # Soft migrations for databases created before optional columns existed.
+        try:
+            connection.execute("ALTER TABLE pending_uploads ADD COLUMN caption TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            connection.execute("ALTER TABLE pending_uploads ADD COLUMN attribution TEXT")
+        except sqlite3.OperationalError:
+            pass
+        for column, typedef in (
+            ("album_id", "TEXT"),
+            ("part_index", "INTEGER"),
+            ("part_count", "INTEGER"),
+        ):
+            try:
+                connection.execute(f"ALTER TABLE pending_uploads ADD COLUMN {column} {typedef}")
+            except sqlite3.OperationalError:
+                pass
         self._connection = connection
 
     def _require(self) -> sqlite3.Connection:

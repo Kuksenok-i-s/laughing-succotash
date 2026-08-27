@@ -1,0 +1,40 @@
+[Unit]
+# A user unit, not a system one: lingering is enabled on the GPU host.
+# Install to ~/.config/systemd/user/ and enable with `systemctl --user enable --now handwriting-ocr`.
+Description=Handwriting OCR service (Qwen3-VL via Ollama behind an HTTP API)
+Documentation=https://github.com/yourname/personal-assistant/blob/main/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/handwriting-ocr/src
+EnvironmentFile=%h/.config/handwriting-ocr/service.env
+
+# The code is not installed into a virtualenv; Ollama is a separate process. Updates are a git
+# pull and a restart. The path is the deploy unit inside the checkout.
+Environment=PYTHONPATH=%h/handwriting-ocr/src/handwriting-ocr
+Environment=PYTHONUNBUFFERED=1
+
+# Never the host's /tmp: image spool and Python tempfiles stay in the service's own directory.
+Environment=TMPDIR=%h/.handwriting-ocr/tmp
+Environment=TEMP=%h/.handwriting-ocr/tmp
+Environment=TMP=%h/.handwriting-ocr/tmp
+
+ExecStart=/usr/bin/python3 -m handwriting_ocr.main
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=handwriting-ocr
+
+[Install]
+WantedBy=default.target

@@ -131,8 +131,15 @@ be able to speak v1 to an old Gateway.
  "text":"...","command":"/new",
  "reply_to":{"message_id":4700,"has_audio":true},
  "upload_id":"01K...",
- "client_time":"2026-08-23T19:00:00+03:00"}
+ "client_time":"2026-08-23T19:00:00+03:00",
+ "sender":{"kind":"user","name":"Илья","username":"ilya","telegram_user_id":"tg:123456789"},
+ "source":{"forwarded":false,"author":{"kind":"user","name":"Илья","username":"ilya",
+           "telegram_user_id":"tg:123456789"}}}
 ```
+
+`sender` is who delivered the update to the bot (the allowlisted user). `source.author` is who
+originally wrote the content. They coincide unless the update is a Telegram forward, in which
+case `source.forwarded` is true and `author` is the original user, hidden name, chat or channel.
 
 Returns immediately — never blocks for the duration of the work:
 
@@ -144,6 +151,13 @@ Returns immediately — never blocks for the duration of the work:
 
 ### `audio.begin` / `audio.commit` / `audio.abort`
 See §6.
+
+### `image.begin` / `image.commit` / `image.abort`
+Same binary framing as audio (§6), for photographs and `image/*` documents. Purpose is always
+`ocr`. Optional `caption` carries the Telegram caption as user context for later analysis.
+Optional `album_id` / `part_index` / `part_count` mark photos from one Telegram media group; the
+Core starts a single job only after every part is committed. Optional `sender` / `source` are the
+same attribution as on `assistant.submit`.
 
 ### `job.cancel`
 `{"job_id":"01K..."}` → `{"cancelled":true|false}`. `false` means the job had already finished.
@@ -192,7 +206,10 @@ audio.commit ──▶ job_id
 ```json
 {"request_id":"01K...","user_id":"tg:123456789","chat_id":123456789,"message_id":4711,
  "filename":"voice.ogg","content_type":"audio/ogg","size":8348293,
- "duration_seconds":612.4,"purpose":"assistant|transcribe_only"}
+ "duration_seconds":612.4,"purpose":"assistant|transcribe_only",
+ "sender":{"kind":"user","name":"Илья","telegram_user_id":"tg:123456789"},
+ "source":{"forwarded":false,"author":{"kind":"user","name":"Илья",
+           "telegram_user_id":"tg:123456789"}}}
 ```
 
 Result `{"upload_id":"01K...","chunk_size":262144,"resume_offset":0}`.
@@ -302,11 +319,15 @@ design. On press it calls `confirmation.resolve` and never acts on the decision 
  "detail":"12 of 28 minutes"}
 ```
 
-Stages: `queued`, `downloading`, `transcribing`, `transcribing_cpu`, `summarizing`, `agent`,
-`executing_tool`, `waiting_confirmation`, `completed`.
+Stages: `queued`, `downloading`, `transcribing`, `transcribing_cpu`, `recognizing`,
+`recognizing_album`, `structuring`, `summarizing`, `agent`, `executing_tool`,
+`waiting_confirmation`, `completed`.
 
 `transcribing_cpu` is the same work as `transcribing` after the GPU host turned out to be
 unusable: the Core switched to local CPU whisper, so the remaining wait is much longer.
+
+`recognizing` / `structuring` are the handwriting-OCR passes on the remote Qwen3-VL service.
+`recognizing_album` is the same OCR work for a Telegram photo album (multiple related photos).
 
 Progress is advisory and **not durable** — dropping it on a disconnect is correct. The Gateway
 coalesces progress into one edited status message per job and rate-limits edits to at most one

@@ -9,7 +9,7 @@ which is why the Mac needs no port forwarding, no VPN and no reverse tunnel.
 ## Responsibilities
 
 Everything that is not Telegram transport: conversation sessions, transcription, hierarchical
-analysis of recordings, the MCP tool surface (reminders, calendar, tasks, notes, memory, contacts,
+analysis of recordings, the MCP tool surface (reminders, calendar, tasks, notes, memory, contacts, diary,
 timers, system status), the permission model and confirmation flow, the scheduler, and all durable
 state.
 
@@ -31,8 +31,9 @@ agent_core/
 ├── audio/             streamed uploads, ffprobe
 ├── search/            the external-search contract (no provider configured)
 ├── jobs/              per-conversation serial execution
-├── scheduler/         reminders, timers, expiry, cleanup
+├── scheduler/         reminders, timers, evening journal, expiry, cleanup
 ├── reminders/         buttoned follow-up after a fire (done / snooze / reschedule)
+├── journal/           evening check-in (work + personal) and the month-end summary
 ├── calendar/          CalendarProvider protocol + local SQLite implementation
 ├── rpc/               the outbound link and the Gateway-facing handlers
 └── storage/           SQLite schema, migrations, repositories

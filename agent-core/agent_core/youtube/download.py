@@ -1,7 +1,9 @@
 """Download YouTube media via the proxy VPS.
 
 YouTube is blocked from the Mac mini and the GPU host, so yt-dlp runs on the gateway proxy over
-SSH. The remote working directory is never ``/tmp`` — that host treats ``/tmp`` as off-limits.
+SSH. The VPS is a transit proxy, not a library: at most one media file sits there, then it is
+pulled onto the Core and deleted. Playlists and channels are walked one watch URL at a time.
+The remote working directory is never ``/tmp`` — that host treats ``/tmp`` as off-limits.
 
 Two jobs share this helper:
 
@@ -17,7 +19,9 @@ import logging
 import posixpath
 import re
 import shlex
+import shutil
 import subprocess
+import threading
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -86,6 +90,50 @@ def _refuse_tmp(remote_dir: str) -> None:
         raise YoutubeError("refusing to use /tmp on the proxy host")
 
 
+def _entry_url(entry: dict) -> str | None:
+    """Watch URL for one yt-dlp listing row. Flat playlists sometimes put only the id in ``url``."""
+    if not entry:
+        return None
+    raw = entry.get("webpage_url") or entry.get("original_url") or entry.get("url")
+    video_id = str(entry.get("id") or "").strip()
+    if raw:
+        raw = str(raw).strip()
+        if "://" in raw:
+            return raw
+        if raw:
+            video_id = video_id or raw
+    if not video_id:
+        return None
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def _entries_from_dump(data: object) -> tuple[str, list[str]]:
+    """``(collection title, watch URLs)`` from ``yt-dlp -J --flat-playlist``."""
+    if not isinstance(data, dict):
+        raise YoutubeError("yt-dlp playlist listing was not JSON")
+    title = str(
+        data.get("title")
+        or data.get("playlist_title")
+        or data.get("channel")
+        or data.get("uploader")
+        or "YouTube"
+    )
+    raw_entries = data.get("entries")
+    if raw_entries is None and data.get("_type") != "playlist":
+        url = _entry_url(data)
+        return title, [url] if url else []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for entry in raw_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        url = _entry_url(entry)
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return title, urls
+
+
 class YoutubeDownloader:
     def __init__(
         self,
@@ -114,6 +162,9 @@ class YoutubeDownloader:
         self.max_videos = max(1, max_videos)
         self._cookies = cookies
         self._local_cookies = local_cookies.expanduser() if local_cookies else None
+        # One yt-dlp on the VPS: playlists walk items sequentially, and concurrent jobs wait.
+        self._vps = threading.Lock()
+        self._proxy_slot = asyncio.Lock()
 
     @classmethod
     def from_settings(cls, settings) -> YoutubeDownloader | None:
@@ -243,26 +294,27 @@ class YoutubeDownloader:
         ok_codes: tuple[int, ...] = (0,),
     ) -> None:
         _refuse_tmp(self._remote_dir)
-        self._sync_cookies()
         remote_job = f"{self._remote_dir}/{job_id}"
         quoted_job = shlex.quote(remote_job)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.run(
-            [*self._ssh(), remote_cmd],
-            text=True,
-            capture_output=True,
-        )
-        if proc.returncode not in ok_codes:
-            err = (proc.stderr or proc.stdout or "yt-dlp failed").strip()
-            raise YoutubeError(err[:500])
-        try:
-            self._pull_dir(remote_job, dest_dir)
-        finally:
-            subprocess.run(
-                [*self._ssh(), f"rm -rf {quoted_job}"],
+        with self._vps:
+            self._sync_cookies()
+            proc = subprocess.run(
+                [*self._ssh(), remote_cmd],
                 text=True,
                 capture_output=True,
             )
+            try:
+                if proc.returncode not in ok_codes:
+                    err = (proc.stderr or proc.stdout or "yt-dlp failed").strip()
+                    raise YoutubeError(err[:500])
+                self._pull_dir(remote_job, dest_dir)
+            finally:
+                subprocess.run(
+                    [*self._ssh(), f"rm -rf {quoted_job}"],
+                    text=True,
+                    capture_output=True,
+                )
 
     async def fetch(self, url: str, dest_dir: Path, *, job_id: str) -> YoutubeMedia:
         batch = await self.fetch_audio(url, dest_dir, job_id=job_id, kind="video")
@@ -277,22 +329,22 @@ class YoutubeDownloader:
         kind: YoutubeKind = "video",
     ) -> YoutubeAudioBatch:
         dest_dir.mkdir(parents=True, exist_ok=True)
-        return await asyncio.to_thread(self._fetch_audio_batch, url, dest_dir, job_id, kind)
+        async with self._proxy_slot:
+            return await asyncio.to_thread(
+                self._fetch_audio_batch, url, dest_dir, job_id, kind
+            )
 
-    def _audio_remote_cmd(self, url: str, job_id: str, kind: YoutubeKind) -> str:
+    def _audio_remote_cmd(self, url: str, job_id: str) -> str:
         remote_job = f"{self._remote_dir}/{job_id}"
         quoted_job = shlex.quote(remote_job)
         quoted_url = shlex.quote(url)
         fmt = shlex.quote(self._audio_format)
-        playlist_flag = "--no-playlist" if kind == "video" else "--yes-playlist"
-        max_flag = "" if kind == "video" else f"--max-downloads {self.max_videos} "
-        ignore_flag = "" if kind == "video" else "--ignore-errors "
         quoted_out = shlex.quote(f"{remote_job}/%(title)s [%(id)s].%(ext)s")
-        # Audio only: the Core transcribes; video would only fill the proxy disk.
+        # One watch URL, audio only: the Core transcribes; video would only fill the proxy disk.
         # The yt-dlp template must be quoted: bash otherwise treats %(id)s as a subshell.
         return (
             f"mkdir -p {quoted_job} && "
-            f"yt-dlp {playlist_flag} {max_flag}{ignore_flag}{self._cookie_args()}"
+            f"yt-dlp --no-playlist {self._cookie_args()}"
             f"-f ba/bestaudio/best -x --audio-format {fmt} "
             f"--write-info-json --no-progress "
             f"-o {quoted_out} {quoted_url}"
@@ -301,10 +353,11 @@ class YoutubeDownloader:
     def _fetch_audio_batch(
         self, url: str, dest_dir: Path, job_id: str, kind: YoutubeKind
     ) -> YoutubeAudioBatch:
-        remote_cmd = self._audio_remote_cmd(url, job_id, kind)
-        ok_codes = (0,) if kind == "video" else (0, 101)
-        self._run_remote(remote_cmd, dest_dir, job_id, ok_codes=ok_codes)
-        batch = self._parse_audio_dir(dest_dir, url, kind)
+        if kind == "video":
+            self._run_remote(self._audio_remote_cmd(url, job_id), dest_dir, job_id)
+            batch = self._parse_audio_dir(dest_dir, url, kind)
+        else:
+            batch = self._fetch_collection_audio(url, dest_dir, job_id, kind)
         log.info(
             "downloaded %d youtube audio file(s) (%s) -> %s",
             len(batch.items),
@@ -312,6 +365,47 @@ class YoutubeDownloader:
             dest_dir,
         )
         return batch
+
+    def _fetch_collection_audio(
+        self, url: str, dest_dir: Path, job_id: str, kind: YoutubeKind
+    ) -> YoutubeAudioBatch:
+        title, watch_urls = self._list_entries(url)
+        items: list[YoutubeMedia] = []
+        for index, watch_url in enumerate(watch_urls, start=1):
+            item_job = f"{job_id}-{index:02d}"
+            scratch = dest_dir / f".part-{index:02d}"
+            log.info(
+                "proxy: youtube audio %d/%d %s", index, len(watch_urls), watch_url
+            )
+            try:
+                self._run_remote(
+                    self._audio_remote_cmd(watch_url, item_job), scratch, item_job
+                )
+                items.extend(
+                    self._take_audio(scratch, dest_dir, watch_url, index=index)
+                )
+            except YoutubeError as exc:
+                log.warning("youtube audio %s failed: %s", watch_url, exc)
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+        if not items:
+            raise YoutubeError("yt-dlp produced no audio file")
+        return YoutubeAudioBatch(dest=dest_dir, items=items, title=title, kind=kind)
+
+    def _take_audio(
+        self, scratch: Path, dest_dir: Path, fallback_url: str, *, index: int
+    ) -> list[YoutubeMedia]:
+        batch = self._parse_audio_dir(scratch, fallback_url, "video")
+        moved: list[YoutubeMedia] = []
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for media in batch.items:
+            target = unique_file(dest_dir, media.audio_path.name, ignore=media.audio_path)
+            if media.audio_path.resolve() != target.resolve():
+                media.audio_path.rename(target)
+                media.audio_path = target
+            media.index = index
+            moved.append(media)
+        return moved
 
     def _parse_audio_dir(
         self, dest_dir: Path, fallback_url: str, kind: YoutubeKind
@@ -373,31 +467,63 @@ class YoutubeDownloader:
         kind: YoutubeKind = "video",
     ) -> YoutubeLibrary:
         dest_dir.mkdir(parents=True, exist_ok=True)
-        return await asyncio.to_thread(self._fetch_video, url, dest_dir, job_id, kind)
+        async with self._proxy_slot:
+            return await asyncio.to_thread(self._fetch_video, url, dest_dir, job_id, kind)
 
-    def _video_remote_cmd(self, url: str, job_id: str, kind: YoutubeKind) -> str:
+    def _list_remote_cmd(self, url: str) -> str:
+        quoted_url = shlex.quote(url)
+        return (
+            f"yt-dlp --flat-playlist --playlist-end {self.max_videos} "
+            f"--no-download -J --no-progress --ignore-errors "
+            f"{self._cookie_args()}{quoted_url}"
+        )
+
+    def _list_entries(self, url: str) -> tuple[str, list[str]]:
+        _refuse_tmp(self._remote_dir)
+        with self._vps:
+            self._sync_cookies()
+            proc = subprocess.run(
+                [*self._ssh(), self._list_remote_cmd(url)],
+                text=True,
+                capture_output=True,
+            )
+            if proc.returncode not in (0, 101):
+                err = (proc.stderr or proc.stdout or "yt-dlp listing failed").strip()
+                raise YoutubeError(err[:500])
+        stdout = proc.stdout or ""
+        start = stdout.find("{")
+        try:
+            data = json.loads(stdout[start:] if start >= 0 else "{}")
+        except json.JSONDecodeError as exc:
+            raise YoutubeError("yt-dlp playlist listing was not JSON") from exc
+        title, watch_urls = _entries_from_dump(data)
+        watch_urls = watch_urls[: self.max_videos]
+        if not watch_urls:
+            raise YoutubeError("yt-dlp listed no items")
+        return title, watch_urls
+
+    def _video_remote_cmd(self, url: str, job_id: str) -> str:
         remote_job = f"{self._remote_dir}/{job_id}"
         quoted_job = shlex.quote(remote_job)
         quoted_url = shlex.quote(url)
-        playlist_flag = "--no-playlist" if kind == "video" else "--yes-playlist"
-        max_flag = "" if kind == "video" else f"--max-downloads {self.max_videos} "
         quoted_fmt = shlex.quote(self._video_format)
         quoted_out = shlex.quote(f"{remote_job}/%(title)s [%(id)s].%(ext)s")
         return (
             f"mkdir -p {quoted_job} && "
-            f"yt-dlp {playlist_flag} {max_flag}{self._cookie_args()}"
+            f"yt-dlp --no-playlist {self._cookie_args()}"
             f"-f {quoted_fmt} "
-            f"--merge-output-format mp4 --write-info-json --no-progress --ignore-errors "
+            f"--merge-output-format mp4 --write-info-json --no-progress "
             f"-o {quoted_out} {quoted_url}"
         )
 
     def _fetch_video(
         self, url: str, dest_dir: Path, job_id: str, kind: YoutubeKind
     ) -> YoutubeLibrary:
-        remote_cmd = self._video_remote_cmd(url, job_id, kind)
-        # yt-dlp exits 101 when --max-downloads is reached; that is the cap working, not a failure.
-        self._run_remote(remote_cmd, dest_dir, job_id, ok_codes=(0, 101))
-        library = self._parse_video_dir(dest_dir, kind)
+        if kind == "video":
+            self._run_remote(self._video_remote_cmd(url, job_id), dest_dir, job_id)
+            library = self._parse_video_dir(dest_dir, kind)
+        else:
+            library = self._fetch_collection_video(url, dest_dir, job_id, kind)
         log.info(
             "downloaded %d youtube video(s) (%s) -> %s",
             len(library.files),
@@ -405,6 +531,42 @@ class YoutubeDownloader:
             dest_dir,
         )
         return library
+
+    def _fetch_collection_video(
+        self, url: str, dest_dir: Path, job_id: str, kind: YoutubeKind
+    ) -> YoutubeLibrary:
+        title, watch_urls = self._list_entries(url)
+        files: list[Path] = []
+        for index, watch_url in enumerate(watch_urls, start=1):
+            item_job = f"{job_id}-{index:02d}"
+            scratch = dest_dir / f".part-{index:02d}"
+            log.info(
+                "proxy: youtube video %d/%d %s", index, len(watch_urls), watch_url
+            )
+            try:
+                self._run_remote(
+                    self._video_remote_cmd(watch_url, item_job), scratch, item_job
+                )
+                files.extend(self._take_videos(scratch, dest_dir, index=index))
+            except YoutubeError as exc:
+                log.warning("youtube video %s failed: %s", watch_url, exc)
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+        if not files:
+            raise YoutubeError("yt-dlp produced no video file")
+        return YoutubeLibrary(dest=dest_dir, files=files, title=title, kind=kind)
+
+    def _take_videos(self, scratch: Path, dest_dir: Path, *, index: int) -> list[Path]:
+        library = self._parse_video_dir(scratch, "video")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        moved: list[Path] = []
+        for path in library.files:
+            name = readable_media_filename(path.stem, path.suffix, index=index)
+            target = unique_file(dest_dir, name, ignore=path)
+            if path.resolve() != target.resolve():
+                path.rename(target)
+            moved.append(target)
+        return moved
 
     def _parse_video_dir(self, dest_dir: Path, kind: YoutubeKind) -> YoutubeLibrary:
         numbered = kind != "video"

@@ -113,8 +113,18 @@ class Settings(BaseSettings):
     max_audio_duration_seconds: int = 14400
     upload_idle_timeout: float = 300.0
 
+    # --- Handwriting OCR (remote only; no local model) ---
+    ocr_enabled: bool = False
+    ocr_service_url: str = "http://127.0.0.1:17494"
+    ocr_service_token: str = ""
+    ocr_poll_interval: float = 2.0
+    ocr_request_timeout: float = 30.0
+    ocr_upload_timeout: float = 300.0
+    ocr_stall_timeout: float = 900.0
+    max_image_size_mb: int = 32
+
     # --- YouTube ---
-    # yt-dlp runs on the proxy VPS over SSH; the toml holds that host and its key.
+    # yt-dlp runs on the proxy VPS over SSH, one file at a time; the toml holds that host and its key.
     youtube_config: Path | None = None
 
     # --- Behaviour ---
@@ -125,6 +135,11 @@ class Settings(BaseSettings):
     # command, which changes both the prompt and the permission provenance.
     long_transcript_chars: int = 1200
     transcript_chunk_chars: int = 12000
+    # Evening diary check-in and the morning of the 1st when last month is summarised.
+    journal_hour: int = Field(default=21, ge=0, le=23)
+    journal_minute: int = Field(default=0, ge=0, le=59)
+    journal_summary_hour: int = Field(default=10, ge=0, le=23)
+    journal_enabled: bool = True
 
     # --- Allowlists (from assistant.toml) ---
     config_file: Path | None = None
@@ -214,6 +229,10 @@ class Settings(BaseSettings):
     def max_audio_bytes(self) -> int:
         return self.max_audio_size_mb * 1024 * 1024
 
+    @cached_property
+    def max_image_bytes(self) -> int:
+        return self.max_image_size_mb * 1024 * 1024
+
     def validate_runtime(self) -> list[str]:
         """Return fatal misconfigurations. Checked at startup so failures are loud and early."""
         problems: list[str] = []
@@ -225,6 +244,8 @@ class Settings(BaseSettings):
             problems.append("MCP_TOKEN is not set")
         if self.stt_backend == "gpu" and not self.stt_gpu_token:
             problems.append("STT_GPU_TOKEN is not set but STT_BACKEND=gpu")
+        if self.ocr_enabled and not self.ocr_service_token:
+            problems.append("OCR_SERVICE_TOKEN is not set but OCR is enabled")
         if not self.allowed_users:
             problems.append("ALLOWED_USERS is empty; the Core would accept nobody")
         for user in self.allowed_users:

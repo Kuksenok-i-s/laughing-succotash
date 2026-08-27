@@ -289,4 +289,69 @@ MIGRATIONS: list[tuple[str, str]] = [
         ALTER TABLE users ADD COLUMN last_chat_id INTEGER;
         """,
     ),
+    (
+        "0004_journal",
+        """
+        CREATE TABLE IF NOT EXISTS journal_entries (
+            entry_id     TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL,
+            local_date   TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'open',
+            step         TEXT NOT NULL DEFAULT 'offer',
+            answers      TEXT NOT NULL DEFAULT '{}',
+            prompted_at  TEXT,
+            completed_at TEXT,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            UNIQUE(user_id, local_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_journal_user_date
+            ON journal_entries(user_id, local_date);
+
+        CREATE TABLE IF NOT EXISTS journal_summaries (
+            summary_id   TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL,
+            period       TEXT NOT NULL,
+            body         TEXT NOT NULL DEFAULT '',
+            entry_count  INTEGER NOT NULL DEFAULT 0,
+            skipped_count INTEGER NOT NULL DEFAULT 0,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            UNIQUE(user_id, period)
+        );
+        CREATE INDEX IF NOT EXISTS idx_journal_summaries_user
+            ON journal_summaries(user_id, period);
+        """,
+    ),
+    (
+        "0005_upload_caption",
+        """
+        ALTER TABLE uploads ADD COLUMN caption TEXT;
+        """,
+    ),
+    (
+        "0006_upload_attribution",
+        """
+        ALTER TABLE uploads ADD COLUMN attribution TEXT;
+        """,
+    ),
+    (
+        "0007_upload_album",
+        """
+        ALTER TABLE uploads ADD COLUMN album_id TEXT;
+        ALTER TABLE uploads ADD COLUMN part_index INTEGER;
+        ALTER TABLE uploads ADD COLUMN part_count INTEGER;
+        CREATE INDEX IF NOT EXISTS idx_uploads_album
+            ON uploads(album_id, part_index) WHERE album_id IS NOT NULL;
+        """,
+    ),
+    (
+        "0008_contact_operation_id",
+        """
+        ALTER TABLE contacts ADD COLUMN operation_id TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_operation
+            ON contacts(operation_id) WHERE operation_id IS NOT NULL;
+        """,
+    ),
 ]
