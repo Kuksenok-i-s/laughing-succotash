@@ -32,6 +32,7 @@ agent_core/
 ├── search/            the external-search contract (no provider configured)
 ├── jobs/              per-conversation serial execution
 ├── scheduler/         reminders, timers, expiry, cleanup
+├── reminders/         buttoned follow-up after a fire (done / snooze / reschedule)
 ├── calendar/          CalendarProvider protocol + local SQLite implementation
 ├── rpc/               the outbound link and the Gateway-facing handlers
 └── storage/           SQLite schema, migrations, repositories

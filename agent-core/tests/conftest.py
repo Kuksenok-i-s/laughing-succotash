@@ -97,6 +97,13 @@ class FakeGateway:
             if method == "telegram.send"
         ]
 
+    def confirms(self) -> list[dict]:
+        return [
+            params
+            for method, params in self.delivered
+            if method == "telegram.confirm"
+        ]
+
 
 @pytest.fixture
 def gateway(repos: Repositories) -> FakeGateway:

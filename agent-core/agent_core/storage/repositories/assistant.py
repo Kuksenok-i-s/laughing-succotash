@@ -161,10 +161,30 @@ class ReminderRepository:
     async def cancel(self, reminder_id: str, user_id: str) -> bool:
         changed = await self._db.execute(
             "UPDATE reminders SET status = 'cancelled', updated_at = ? "
-            "WHERE reminder_id = ? AND user_id = ? AND status = 'scheduled'",
+            "WHERE reminder_id = ? AND user_id = ? AND status IN ('scheduled', 'fired')",
             (utcnow().isoformat(), reminder_id, user_id),
         )
         return changed > 0
+
+    async def complete(self, reminder_id: str, user_id: str) -> bool:
+        """Mark a fired one-shot as done. Recurring rows stay scheduled and are not touched."""
+        changed = await self._db.execute(
+            "UPDATE reminders SET status = 'completed', updated_at = ? "
+            "WHERE reminder_id = ? AND user_id = ? AND status = 'fired'",
+            (utcnow().isoformat(), reminder_id, user_id),
+        )
+        return changed > 0
+
+    async def reschedule(self, reminder_id: str, user_id: str, due_at: datetime) -> Reminder | None:
+        """Put a fired one-shot back on the clock. Cancelled rows stay cancelled."""
+        changed = await self._db.execute(
+            "UPDATE reminders SET status = 'scheduled', due_at = ?, updated_at = ? "
+            "WHERE reminder_id = ? AND user_id = ? AND status IN ('fired', 'scheduled')",
+            (to_iso(due_at), utcnow().isoformat(), reminder_id, user_id),
+        )
+        if changed <= 0:
+            return None
+        return await self.get(reminder_id, user_id)
 
     async def mark_fired(self, reminder_id: str, next_due: datetime | None) -> None:
         """Advance a reminder after it fires.

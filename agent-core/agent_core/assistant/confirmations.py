@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pa_protocol import methods, new_ulid
@@ -18,6 +19,10 @@ from pa_protocol import methods, new_ulid
 from ..storage.repositories import PendingAction, PendingActionRepository
 
 log = logging.getLogger(__name__)
+
+# Durable handlers run when a button is pressed and nobody is blocked on the answer.
+# Used by reminder follow-up, which must survive a Core restart.
+FollowupHandler = Callable[[PendingAction, str], Awaitable[None]]
 
 
 class ConfirmationService:
@@ -33,6 +38,10 @@ class ConfirmationService:
         self._timeout = timeout_seconds
         # action_id -> future resolved by the Gateway callback or by expiry.
         self._waiters: dict[str, asyncio.Future[str]] = {}
+        self._handlers: dict[str, FollowupHandler] = {}
+
+    def register_handler(self, tool_name: str, handler: FollowupHandler) -> None:
+        self._handlers[tool_name] = handler
 
     async def request(
         self,
@@ -129,8 +138,59 @@ class ConfirmationService:
             return None
         return choice
 
+    async def prompt(
+        self,
+        *,
+        user_id: str,
+        chat_id: int | None,
+        tool_name: str,
+        arguments: dict[str, Any],
+        operation_id: str,
+        prompt_text: str,
+        actions: list[methods.ConfirmAction],
+        tier: str = "followup",
+        delivery_id: str | None = None,
+        ttl_seconds: int | None = None,
+        job_id: str | None = None,
+    ) -> PendingAction:
+        """Show buttons and return immediately.
+
+        Unlike :meth:`request_choice` this does not block. The press is handled later by a
+        registered handler (or reported as a restart if none exists).
+        """
+        action = await self._pending.create(
+            user_id=user_id,
+            chat_id=chat_id,
+            job_id=job_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            operation_id=operation_id,
+            tier=tier,
+            prompt_text=prompt_text,
+            ttl_seconds=ttl_seconds if ttl_seconds is not None else self._timeout,
+        )
+        delivery = delivery_id or new_ulid()
+        await self._link.send_event(
+            methods.TELEGRAM_CONFIRM,
+            methods.dump(
+                methods.TelegramConfirmParams(
+                    delivery_id=delivery,
+                    action_id=action.action_id,
+                    user_id=user_id,
+                    chat_id=chat_id or 0,
+                    text=prompt_text,
+                    actions=list(actions),
+                    expires_at=action.expires_at,
+                )
+            ),
+            delivery_id=delivery,
+            user_id=user_id,
+        )
+        return action
+
     async def resolve(self, action_id: str, user_id: str, choice: str) -> str:
         """Apply the user's answer. Called by the ``confirmation.resolve`` RPC handler."""
+        action = await self._pending.get(action_id)
         db_status = "rejected" if choice in {"reject", "expired", "cancel"} else "approved"
         status = await self._pending.resolve(action_id, user_id, db_status)
         if status != "applied":
@@ -139,13 +199,23 @@ class ConfirmationService:
         future = self._waiters.get(action_id)
         if future is not None and not future.done():
             future.set_result(choice)
-        else:
-            # Nobody is waiting: the Core restarted since the prompt was sent, so the tool call
-            # that would have executed this no longer exists. Report it rather than silently
-            # dropping the user's decision.
-            log.warning(
-                "confirmation %s resolved but its caller is gone (core restarted?)", action_id
-            )
+            return "applied"
+
+        if action is not None:
+            handler = self._handlers.get(action.tool_name)
+            if handler is not None:
+                try:
+                    await handler(action, choice)
+                except Exception:
+                    log.exception("confirmation handler failed for %s", action.tool_name)
+                return "applied"
+
+        # Nobody is waiting: the Core restarted since the prompt was sent, so the tool call
+        # that would have executed this no longer exists. Report it rather than silently
+        # dropping the user's decision.
+        log.warning(
+            "confirmation %s resolved but its caller is gone (core restarted?)", action_id
+        )
         return "applied"
 
     async def expire_overdue(self) -> list[PendingAction]:

@@ -144,6 +144,26 @@ async def test_a_reminder_can_only_be_cancelled_once(repos) -> None:
     assert await repos.reminders.cancel(reminder.reminder_id, "tg:1") is False
 
 
+async def test_a_fired_reminder_can_be_completed_or_put_back(repos) -> None:
+    reminder, _ = await repos.reminders.create(
+        user_id="tg:1", text="x", due_at=NOW, timezone_name="UTC", operation_id="op-fire"
+    )
+    await repos.reminders.mark_fired(reminder.reminder_id, None)
+
+    later = NOW + timedelta(hours=2)
+    restored = await repos.reminders.reschedule(reminder.reminder_id, "tg:1", later)
+    assert restored is not None
+    assert restored.status == "scheduled"
+    assert restored.due_at == later
+
+    await repos.reminders.mark_fired(reminder.reminder_id, None)
+    assert await repos.reminders.complete(reminder.reminder_id, "tg:1") is True
+    assert await repos.reminders.complete(reminder.reminder_id, "tg:1") is False
+    assert await repos.reminders.reschedule(
+        reminder.reminder_id, "tg:1", later
+    ) is None
+
+
 async def test_a_finished_job_cannot_be_finished_again(repos) -> None:
     job, _ = await repos.jobs.create_or_get(request_id="r", user_id="tg:1", kind="text")
 

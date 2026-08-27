@@ -74,6 +74,14 @@ class PendingActionRepository:
         )
         return PendingAction.from_row(row) if row else None
 
+    async def get_by_operation_id(self, operation_id: str) -> PendingAction | None:
+        row = await self._db.fetch_one(
+            "SELECT * FROM pending_actions WHERE operation_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (operation_id,),
+        )
+        return PendingAction.from_row(row) if row else None
+
     async def resolve(self, action_id: str, user_id: str, status: str) -> str:
         """Atomically move a pending action to a terminal state.
 

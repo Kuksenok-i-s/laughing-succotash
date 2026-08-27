@@ -24,6 +24,7 @@ from .jobs.manager import JobManager
 from .logging_setup import configure_logging
 from .mcp.server import ContextRegistry, McpServer, ToolRegistry
 from .mcp.tools import register_tools
+from .reminders import FollowupService
 from .rpc.connection import GatewayLink
 from .rpc.handlers import CoreHandlers
 from .scheduler.service import Scheduler
@@ -141,6 +142,15 @@ class Core:
             uploads=self._uploads,
             default_timezone=self._settings.default_timezone,
         )
+        followup = FollowupService(
+            repos,
+            self._confirmations,
+            link,
+            default_timezone=self._settings.default_timezone,
+            wake=self._scheduler.wake,
+        )
+        self._confirmations.register_handler(FollowupService.TOOL, followup.handle)
+        self._scheduler.followup = followup
 
         register_tools(
             registry,

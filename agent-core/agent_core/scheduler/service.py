@@ -31,6 +31,7 @@ class Scheduler:
         tick_seconds: float = 5.0,
         confirmations=None,
         uploads=None,
+        followup=None,
         default_timezone: str = "UTC",
     ) -> None:
         self._repos = repos
@@ -38,6 +39,7 @@ class Scheduler:
         self._tick = tick_seconds
         self._confirmations = confirmations
         self._uploads = uploads
+        self.followup = followup
         self._default_timezone = default_timezone
 
         self._task: asyncio.Task[None] | None = None
@@ -112,14 +114,17 @@ class Scheduler:
                 continue
 
             user_tz = _zone(reminder.timezone, self._default_timezone)
-            await self._assistant.notify(
-                reminder.user_id,
-                chat_id,
-                f"⏰ {reminder.text}",
-                # Includes fire_count so each occurrence of a recurring reminder is a distinct
-                # delivery, while a retry of the same occurrence is not.
-                delivery_id=f"reminder:{reminder.reminder_id}:{reminder.fire_count}",
-            )
+            if self.followup is not None:
+                await self.followup.offer(reminder, chat_id)
+            else:
+                await self._assistant.notify(
+                    reminder.user_id,
+                    chat_id,
+                    f"⏰ {reminder.text}",
+                    # Includes fire_count so each occurrence of a recurring reminder is a distinct
+                    # delivery, while a retry of the same occurrence is not.
+                    delivery_id=f"reminder:{reminder.reminder_id}:{reminder.fire_count}",
+                )
 
             following = None
             if reminder.rrule:

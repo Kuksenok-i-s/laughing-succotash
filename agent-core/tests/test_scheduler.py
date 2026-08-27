@@ -7,7 +7,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from agent_core.assistant.confirmations import ConfirmationService
 from agent_core.assistant.service import AssistantService
+from agent_core.reminders import FollowupService
 from agent_core.scheduler.service import Scheduler
 
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -20,8 +22,18 @@ def notifier(settings, repos, gateway, backend):
 
 
 @pytest.fixture
-def scheduler(settings, repos, notifier):
-    return Scheduler(repos, notifier, default_timezone=settings.default_timezone)
+def scheduler(settings, repos, notifier, gateway):
+    confirmations = ConfirmationService(repos.pending_actions, gateway, timeout_seconds=3600)
+    followup = FollowupService(
+        repos, confirmations, gateway, default_timezone=settings.default_timezone,
+    )
+    confirmations.register_handler(FollowupService.TOOL, followup.handle)
+    sched = Scheduler(
+        repos, notifier, confirmations=confirmations, followup=followup,
+        default_timezone=settings.default_timezone,
+    )
+    followup._wake = sched.wake  # noqa: SLF001
+    return sched
 
 
 async def _user(repos, chat_id: int = 500) -> None:
@@ -42,7 +54,10 @@ async def test_one_shot_reminder_fires_exactly_once(repos, gateway, scheduler) -
     await scheduler.tick()
     await scheduler.tick()
 
-    assert gateway.texts() == ["⏰ Выключить духовку"]
+    confirms = gateway.confirms()
+    assert len(confirms) == 1
+    assert "Выключить духовку" in confirms[0]["text"]
+    assert [action["id"] for action in confirms[0]["actions"]] == ["done", "not_done", "drop"]
     assert await repos.reminders.list("tg:1", status="scheduled") == []
     assert (await repos.reminders.list("tg:1", status="fired"))[0].fire_count == 1
 
@@ -64,11 +79,11 @@ async def test_recurring_reminder_is_rescheduled(repos, gateway, scheduler) -> N
     assert len(still_scheduled) == 1
     assert still_scheduled[0].fire_count == 1
     assert still_scheduled[0].due_at > datetime.now(timezone.utc)
-    assert len(gateway.texts()) == 1
+    assert len(gateway.confirms()) == 1
 
     # The next tick must not fire it again: its new due time is in the future.
     await scheduler.tick()
-    assert len(gateway.texts()) == 1
+    assert len(gateway.confirms()) == 1
 
 
 async def test_reminder_fired_while_gateway_is_down_arrives_once(
@@ -88,11 +103,11 @@ async def test_reminder_fired_while_gateway_is_down_arrives_once(
     # Gateway comes back.
     gateway.online = True
     assert await gateway.drain() == 1
-    assert gateway.texts() == ["⏰ Позвонить Ивану"]
+    assert "Позвонить Ивану" in gateway.confirms()[0]["text"]
 
     # A second drain (a reconnect replay) must not resend it.
     assert await gateway.drain() == 0
-    assert len(gateway.texts()) == 1
+    assert len(gateway.confirms()) == 1
 
 
 async def test_a_replayed_fire_is_deduplicated_by_delivery_id(repos, gateway, scheduler) -> None:
@@ -112,7 +127,7 @@ async def test_a_replayed_fire_is_deduplicated_by_delivery_id(repos, gateway, sc
     )
     await scheduler._fire_reminders(datetime.now(timezone.utc))  # noqa: SLF001
 
-    assert len(gateway.texts()) == 1
+    assert len(gateway.confirms()) == 1
 
 
 async def test_reminder_without_a_known_chat_stays_scheduled(repos, gateway, scheduler) -> None:
@@ -142,7 +157,7 @@ async def test_due_time_respects_the_users_timezone(repos, gateway, scheduler) -
     assert gateway.delivered == []
 
     await scheduler.tick(now=tonight_local.astimezone(timezone.utc) + timedelta(minutes=1))
-    assert gateway.texts() == ["⏰ вечером"]
+    assert "вечером" in gateway.confirms()[0]["text"]
 
 
 async def test_timers_fire_and_do_not_repeat(repos, gateway, scheduler) -> None:
