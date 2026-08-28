@@ -57,7 +57,7 @@ def test_a_transcript_with_no_segments_still_produces_a_chunk() -> None:
 async def test_a_single_chunk_is_passed_through_verbatim(tmp_path) -> None:
     """No point paying for an extraction pass over text that already fits."""
     backend = FakeBackend()
-    analyzer = TranscriptAnalyzer(backend, workspace=tmp_path, chunk_chars=10000)
+    analyzer = TranscriptAnalyzer(backend, workspace_for=lambda _uid: tmp_path, chunk_chars=10000)
 
     analysis = await analyzer.analyze(transcription(2), context_for())
 
@@ -75,7 +75,7 @@ async def test_each_chunk_is_analysed_separately_and_merged_in_order(tmp_path) -
         return AgentResponse(text=f"РЕШЕНИЯ: решение {index}")
 
     backend = FakeBackend(on_prompt=respond)
-    analyzer = TranscriptAnalyzer(backend, workspace=tmp_path, chunk_chars=500)
+    analyzer = TranscriptAnalyzer(backend, workspace_for=lambda _uid: tmp_path, chunk_chars=500)
 
     analysis = await analyzer.analyze(
         transcription(30), context_for(provenance=Provenance.UNTRUSTED_CONTENT)
@@ -96,7 +96,7 @@ async def test_one_failed_chunk_does_not_lose_the_rest(tmp_path) -> None:
         return AgentResponse(text="ЗАДАЧИ: что-то")
 
     backend = FakeBackend(on_prompt=flaky)
-    analyzer = TranscriptAnalyzer(backend, workspace=tmp_path, chunk_chars=500)
+    analyzer = TranscriptAnalyzer(backend, workspace_for=lambda _uid: tmp_path, chunk_chars=500)
 
     analysis = await analyzer.analyze(transcription(30), context_for())
 
@@ -112,7 +112,7 @@ async def test_progress_is_reported_per_chunk(tmp_path) -> None:
     async def record(fraction: float) -> None:
         fractions.append(fraction)
 
-    analyzer = TranscriptAnalyzer(FakeBackend(), workspace=tmp_path, chunk_chars=500)
+    analyzer = TranscriptAnalyzer(FakeBackend(), workspace_for=lambda _uid: tmp_path, chunk_chars=500)
     await analyzer.analyze(transcription(30), context_for(), on_progress=record)
 
     assert fractions == sorted(fractions)

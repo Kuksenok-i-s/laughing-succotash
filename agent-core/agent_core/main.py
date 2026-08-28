@@ -119,7 +119,7 @@ class Core:
             self._backend,
             contexts,
             self._mcp,
-            default_workspace=self._settings.resolved_assistant_workspace,
+            user_workspace=self._settings.user_workspace,
         )
 
         assistant = AssistantService(
@@ -133,7 +133,7 @@ class Core:
             uploads=self._uploads,
             analyzer=TranscriptAnalyzer(
                 self._backend,
-                workspace=self._settings.resolved_assistant_workspace,
+                workspace_for=self._settings.user_workspace,
                 chunk_chars=self._settings.transcript_chunk_chars,
             ),
             youtube=YoutubeDownloader.from_settings(self._settings),
@@ -170,7 +170,7 @@ class Core:
             summary_hour=self._settings.journal_summary_hour,
             enabled=self._settings.journal_enabled,
             backend=self._backend,
-            workspace=self._settings.resolved_assistant_workspace,
+            workspace_for=self._settings.user_workspace,
         )
         self._confirmations.register_handler(JournalService.TOOL, journal.handle)
         self._scheduler.journal = journal
@@ -228,9 +228,7 @@ class Core:
             )
         return CursorACPBackend(
             self._settings.cursor_agent_binary,
-            # The conversation session is rooted in a sandbox directory: Cursor's built-in write
-            # and shell tools do not go through the permission callback (docs/cursor-acp.md), so
-            # the session must not start anywhere that matters.
+            # Process cwd only; each conversation session is rooted in DATA_DIR/user_{tg_id}.
             default_workspace=self._settings.resolved_assistant_workspace,
             model=self._settings.cursor_model,
             startup_timeout=self._settings.agent_startup_timeout,

@@ -344,7 +344,9 @@ class AssistantService:
             await self._repos.conversations.get_or_create_conversation(job.user_id)
         ).conversation_id
 
-        session, is_new = await self._sessions.ensure_session(conversation_id)
+        session, is_new = await self._sessions.ensure_session(
+            conversation_id, user_id=job.user_id
+        )
         agent_context = await self._turn_context(job, provenance, conversation_id)
         tool_context = ToolContext(
             user_id=job.user_id,
@@ -964,7 +966,7 @@ class AssistantService:
             excerpt = analysis.excerpt or excerpt
 
         session_id = await self._backend.create_session(
-            workspace=self._settings.resolved_assistant_workspace, mcp_servers=[]
+            workspace=self._settings.user_workspace(job.user_id), mcp_servers=[]
         )
         prompt = prompts.youtube_summary(
             title,
@@ -990,7 +992,7 @@ class AssistantService:
     ) -> str:
         agent_context = await self._turn_context(job, Provenance.UNTRUSTED_CONTENT)
         session_id = await self._backend.create_session(
-            workspace=self._settings.resolved_assistant_workspace, mcp_servers=[]
+            workspace=self._settings.user_workspace(job.user_id), mcp_servers=[]
         )
         prompt = prompts.youtube_collection_summary(
             title, kind, entries, agent_context, url=url
@@ -1275,14 +1277,16 @@ def _verbatim(message: str, _context: AgentContext) -> str:
     return message
 
 
-def workspace_for(settings, project: str | None) -> Path:
-    """Resolve a project name to an allowlisted path.
+def workspace_for(settings, project: str | None, *, user_id: str | None = None) -> Path:
+    """Resolve a project name to an allowlisted path, or the per-user sandbox.
 
     Anything not named in ``assistant.toml`` is refused: Cursor may only open directories the user
-    has explicitly opted in.
+    has explicitly opted in. Ordinary chat uses ``user_workspace(user_id)`` instead.
     """
     if project is None:
-        return settings.resolved_assistant_workspace
+        if user_id is None:
+            return settings.resolved_assistant_workspace
+        return settings.user_workspace(user_id)
     configured = settings.projects.get(project)
     if configured is None:
         raise PermissionError(f"project {project!r} is not in the allowlist")

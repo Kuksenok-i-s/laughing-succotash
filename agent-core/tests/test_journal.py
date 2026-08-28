@@ -163,7 +163,7 @@ async def test_month_end_summary_uses_the_agent(
 ) -> None:
     service, _ = journal
     service._backend = backend
-    service._workspace = tmp_path / "workspace"
+    service._workspace_for = lambda _uid: tmp_path / "workspace"
     backend.reply = "*Итог августа 2026*\n\n*Работа*\n- релиз вышел."
     await _user(repos)
 

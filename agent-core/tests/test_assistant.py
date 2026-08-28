@@ -134,7 +134,7 @@ def build(settings, repos, gateway, backend, contexts, tmp_path):
             chosen,
             contexts,
             FakeMcp(),
-            default_workspace=tmp_path / "workspace",
+            user_workspace=settings.user_workspace,
         )
         jobs = JobManager()
         service = AssistantService(
@@ -148,7 +148,7 @@ def build(settings, repos, gateway, backend, contexts, tmp_path):
             uploads=uploads if uploads is not None else FakeUploads(),
             analyzer=TranscriptAnalyzer(
                 chosen,
-                workspace=tmp_path / "workspace",
+                workspace_for=settings.user_workspace,
                 chunk_chars=settings.transcript_chunk_chars,
             ),
             youtube=youtube,

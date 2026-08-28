@@ -154,6 +154,7 @@ class CursorACPBackend:
         if not session_id:
             raise AgentError("cursor session/new returned no sessionId")
         self._live_sessions.add(session_id)
+        client.bind_session_root(session_id, workspace)
 
         if self._model:
             await self._select_model(session_id)
@@ -186,6 +187,8 @@ class CursorACPBackend:
         """
         await self._ensure_started()
         if session_id in self._live_sessions:
+            client = self._require()
+            client.bind_session_root(session_id, workspace)
             return True
         client = self._require()
         if not client.agent_capabilities.get("loadSession"):
@@ -204,6 +207,7 @@ class CursorACPBackend:
             log.info("could not resume cursor session %s: %s", session_id, exc)
             return False
         self._live_sessions.add(session_id)
+        client.bind_session_root(session_id, workspace)
         return True
 
     async def set_mode(self, session_id: str, mode: str) -> None:

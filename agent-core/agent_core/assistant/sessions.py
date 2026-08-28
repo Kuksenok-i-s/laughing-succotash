@@ -7,12 +7,16 @@ reattaches to the same Cursor session rather than starting the user's history ov
 Each session is also issued its own MCP token. That token is what lets the MCP server work out
 which conversation — and therefore which user — a tool call belongs to, instead of trusting a
 ``user_id`` argument the model could invent.
+
+The Cursor session ``cwd`` is the per-user directory ``DATA_DIR/user_{tg_id}``: the agent may
+only touch files there (enforced again on ACP ``fs/*``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from ..agent.base import AgentBackend, AgentContext, AgentError
@@ -29,13 +33,13 @@ class SessionManager:
         contexts,
         mcp_server,
         *,
-        default_workspace: Path,
+        user_workspace: Callable[[str], Path],
     ) -> None:
         self._conversations = conversations
         self._backend = backend
         self._contexts = contexts
         self._mcp = mcp_server
-        self._default_workspace = default_workspace
+        self._user_workspace = user_workspace
         self._locks: dict[str, asyncio.Lock] = {}
         # conversation_id -> MCP token, so a token survives for the life of the session.
         self._tokens: dict[str, str] = {}
@@ -44,31 +48,44 @@ class SessionManager:
         return self._locks.setdefault(conversation_id, asyncio.Lock())
 
     async def ensure_session(
-        self, conversation_id: str, *, workspace: Path | None = None
+        self, conversation_id: str, *, user_id: str
     ) -> tuple[CursorSession, bool]:
         """Return a usable Cursor session and whether it was just created.
 
         The caller needs to know: a brand-new session has never seen the operating instructions,
         while a resumed one still has them in its history.
+
+        If an older session was rooted in the shared ``workspace/`` directory, it is closed and
+        replaced — history in Cursor does not migrate; SQLite memory and reminders do.
         """
-        target = workspace or self._default_workspace
+        target = self._user_workspace(user_id)
 
         async with self._lock(conversation_id):
-            record = (
-                await self._conversations.find_session_by_workspace(conversation_id, str(target))
-                if workspace is not None
-                else await self._conversations.session_for_conversation(conversation_id)
+            record = await self._conversations.find_session_by_workspace(
+                conversation_id, str(target)
             )
+
+            if record is None:
+                stale = await self._conversations.session_for_conversation(conversation_id)
+                if stale is not None and stale.workspace != str(target):
+                    log.info(
+                        "closing cursor session %s with obsolete workspace %s "
+                        "(now %s)",
+                        stale.external_id,
+                        stale.workspace,
+                        target,
+                    )
+                    await self._conversations.close_session(stale.session_id)
 
             if record is not None and record.external_id:
                 token = self._token_for(conversation_id)
                 resumed = await self._resume(record, target, token)
                 if resumed:
                     return record, False
-                # The session is gone from Cursor's side (a reinstall, a cleared cache). Close the
-                # record and open a fresh one rather than failing the user's message.
-                log.info("cursor session %s could not be resumed; starting a new one",
-                         record.external_id)
+                log.info(
+                    "cursor session %s could not be resumed; starting a new one",
+                    record.external_id,
+                )
                 await self._conversations.close_session(record.session_id)
 
             return await self._create(conversation_id, target), True

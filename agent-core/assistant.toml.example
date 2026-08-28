@@ -1,23 +1,16 @@
 # Filesystem and project allowlists for the Agent Core.
 #
-# Copy to DATA_DIR/assistant.toml (or point CONFIG_FILE at it). Nothing outside these lists is
-# reachable: $HOME as a whole is never indexed, and a project that is not named here cannot be
-# opened even if the user asks for it by absolute path.
+# Copy to DATA_DIR/assistant.toml (or point CONFIG_FILE at it).
+#
+# The Telegram Cursor agent does NOT use these lists for ordinary chat. Each user is confined to
+# DATA_DIR/user_{tg_id} (created automatically). Leave [projects] empty unless you intentionally
+# open a coding workspace — never add this assistant's own repository as a writable project.
 
-# Directories the assistant may read for documents and notes.
-files = [
-    "/Users/me/Documents/Assistant",
-    "/Users/me/Notes",
-]
+# Optional extra read roots for future features. Prefer empty; the agent must not browse $HOME.
+files = []
 
-# Software projects Cursor may open as a coding agent. `writable = false` means it may read and
-# reason about the project but not modify it.
-[projects.awgvpn]
-path = "/Users/me/projects/awgvpn"
-writable = true
-description = "AmneziaWG client and server configuration"
-
-[projects.infra]
-path = "/Users/me/projects/infra"
-writable = false
-description = "Production infrastructure — read-only on purpose"
+# Example of a coding project (omit in production for the personal assistant):
+# [projects.example]
+# path = "/home/me/projects/example"
+# writable = false
+# description = "Read-only example — plan mode only"

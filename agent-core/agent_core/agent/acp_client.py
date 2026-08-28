@@ -17,6 +17,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from .fs_sandbox import resolve_under_root
+
 log = logging.getLogger(__name__)
 
 # Cursor streams replies in very small pieces; a single line can still be large when a tool result
@@ -54,6 +56,8 @@ class AcpClient:
         self._stderr_reader: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
         self._closing = False
+        # sessionId -> absolute root the agent may touch via fs/* (default deny elsewhere).
+        self._session_roots: dict[str, Path] = {}
 
         self.agent_capabilities: dict[str, Any] = {}
         self.auth_methods: list[dict[str, Any]] = []
@@ -64,6 +68,13 @@ class AcpClient:
     @property
     def running(self) -> bool:
         return self._process is not None and self._process.returncode is None
+
+    def bind_session_root(self, session_id: str, root: Path) -> None:
+        """Restrict ACP filesystem tools for ``session_id`` to ``root`` (and below)."""
+        self._session_roots[session_id] = root.expanduser().resolve()
+
+    def unbind_session_root(self, session_id: str) -> None:
+        self._session_roots.pop(session_id, None)
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -107,6 +118,7 @@ class AcpClient:
 
     async def close(self) -> None:
         self._closing = True
+        self._session_roots.clear()
         process = self._process
         if process is None:
             return
@@ -266,9 +278,8 @@ class AcpClient:
     async def _handle_server_request(self, message: dict[str, Any]) -> None:
         """Answer a request originated by Cursor.
 
-        Only the handful of client methods Cursor actually uses are implemented. Filesystem access
-        is intentionally *not* proxied through here — Cursor reads and writes directly, and
-        containment comes from the session's ``cwd`` (see docs/cursor-acp.md).
+        Filesystem calls are gated against the session root registered at ``session/new`` /
+        ``session/load``. Paths outside that root are denied (ADR 7 / per-user sandbox).
         """
         method = message["method"]
         params = message.get("params") or {}
@@ -307,19 +318,43 @@ class AcpClient:
             return {"outcome": {"outcome": "cancelled"}}
         return {"outcome": {"outcome": "selected", "optionId": chosen}}
 
-    @staticmethod
-    def _read_file(params: dict[str, Any]) -> dict[str, Any]:
-        path = Path(params["path"])
+    def _root_for(self, params: dict[str, Any]) -> Path | None:
+        session_id = params.get("sessionId") or ""
+        if not session_id:
+            return None
+        return self._session_roots.get(session_id)
+
+    def _read_file(self, params: dict[str, Any]) -> dict[str, Any]:
+        root = self._root_for(params)
+        if root is None:
+            log.warning("fs/read denied: unknown or missing sessionId")
+            return {"content": ""}
+        allowed = resolve_under_root(root, params.get("path", ""))
+        if allowed is None:
+            log.warning("fs/read denied outside session root: %s", params.get("path"))
+            return {"content": ""}
         try:
-            return {"content": path.read_text(encoding="utf-8", errors="replace")}
+            return {"content": allowed.read_text(encoding="utf-8", errors="replace")}
         except OSError:
             return {"content": ""}
 
-    @staticmethod
-    def _write_file(params: dict[str, Any]) -> dict[str, Any]:
-        path = Path(params["path"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(params.get("content", ""), encoding="utf-8")
+    def _write_file(self, params: dict[str, Any]) -> dict[str, Any]:
+        root = self._root_for(params)
+        if root is None:
+            log.warning("fs/write denied: unknown or missing sessionId")
+            return {}
+        allowed = resolve_under_root(root, params.get("path", ""))
+        if allowed is None:
+            log.warning("fs/write denied outside session root: %s", params.get("path"))
+            return {}
+        try:
+            allowed.parent.mkdir(parents=True, exist_ok=True)
+            if not resolve_under_root(root, allowed.parent):
+                log.warning("fs/write denied: parent escaped session root: %s", allowed)
+                return {}
+            allowed.write_text(params.get("content", ""), encoding="utf-8")
+        except OSError:
+            log.warning("fs/write failed for %s", allowed, exc_info=True)
         return {}
 
 

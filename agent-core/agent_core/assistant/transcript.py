@@ -13,6 +13,7 @@ tools to misuse.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -73,12 +74,12 @@ class TranscriptAnalyzer:
         self,
         backend: AgentBackend,
         *,
-        workspace: Path,
+        workspace_for: Callable[[str], Path],
         chunk_chars: int = 12000,
         excerpt_chars: int = 4000,
     ) -> None:
         self._backend = backend
-        self._workspace = workspace
+        self._workspace_for = workspace_for
         self._chunk_chars = chunk_chars
         self._excerpt_chars = excerpt_chars
 
@@ -97,7 +98,7 @@ class TranscriptAnalyzer:
             return Analysis(notes="", excerpt=result.with_timestamps(), chunk_count=1)
 
         session_id = await self._backend.create_session(
-            workspace=self._workspace, mcp_servers=[]
+            workspace=self._workspace_for(context.user_id), mcp_servers=[]
         )
         log.info("analysing transcript in %d chunks (session %s)", len(chunks), session_id)
 

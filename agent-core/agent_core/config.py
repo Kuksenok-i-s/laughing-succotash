@@ -18,7 +18,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class ProjectConfig(BaseModel):
-    """One coding project Cursor is permitted to open."""
+    """One coding project Cursor is permitted to open.
+
+    Prefer leaving ``[projects]`` empty: the Telegram agent is confined to
+    ``DATA_DIR/user_{tg_id}`` and must not open the assistant's own source tree.
+    """
 
     path: Path
     writable: bool = False
@@ -82,9 +86,8 @@ class Settings(BaseSettings):
     cursor_model: str | None = None
     agent_startup_timeout: float = 60.0
     agent_prompt_timeout: float = 1800.0
-    # Sandbox workspace for ordinary assistant chat. Cursor's built-in write and shell tools do
-    # not request permission (see docs/cursor-acp.md), so the conversation session must not be
-    # rooted anywhere that matters.
+    # Fallback cwd for the ACP subprocess itself (before any session). Per-user chat sessions
+    # use ``user_workspace`` under DATA_DIR; this must not be a sensitive tree.
     assistant_workspace: Path | None = None
 
     # --- MCP ---
@@ -184,6 +187,18 @@ class Settings(BaseSettings):
         )
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def user_workspace(self, user_id: str) -> Path:
+        """Per-Telegram-user directory the Cursor agent may read and write.
+
+        Layout: ``DATA_DIR/user_{tg_id}``. Created on first use. Everything else on the
+        filesystem is out of bounds for ACP ``fs/*`` tools (see ``agent.fs_sandbox``).
+        """
+        from .agent.fs_sandbox import telegram_dir_id
+
+        path = self.resolved_data_dir / f"user_{telegram_dir_id(user_id)}"
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
 
     @cached_property
     def timezone(self) -> tzinfo:

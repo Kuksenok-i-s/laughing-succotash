@@ -51,7 +51,7 @@ class JournalService:
         summary_hour: int = 10,
         enabled: bool = True,
         backend=None,
-        workspace: Path | None = None,
+        workspace_for=None,
     ) -> None:
         self._repos = repos
         self._confirmations = confirmations
@@ -61,7 +61,7 @@ class JournalService:
         self._summary_hour = summary_hour
         self._enabled = enabled
         self._backend = backend
-        self._workspace = workspace
+        self._workspace_for = workspace_for
         self._inflight: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
 
@@ -314,7 +314,7 @@ class JournalService:
         self, user_id: str, period: str, entries: list[JournalEntry], now: datetime
     ) -> str:
         fallback = format_month_fallback(period, entries)
-        if self._backend is None or self._workspace is None:
+        if self._backend is None or self._workspace_for is None:
             return fallback
         user_tz = await self._repos.conversations.timezone_for(user_id)
         context = AgentContext(
@@ -326,7 +326,7 @@ class JournalService:
         )
         try:
             session_id = await self._backend.create_session(
-                workspace=self._workspace, mcp_servers=[]
+                workspace=self._workspace_for(user_id), mcp_servers=[]
             )
             response = await self._backend.send_message(
                 session_id,
