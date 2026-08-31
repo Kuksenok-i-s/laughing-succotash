@@ -70,6 +70,8 @@ class CursorACPBackend:
         # Sessions this process has created or loaded. A session from a previous run must be
         # loaded once before it will accept a prompt.
         self._live_sessions: set[str] = set()
+        # Chat sessions forced into plan mode (built-in shell/write blocked; MCP still works).
+        self._plan_sessions: set[str] = set()
         self._start_lock = asyncio.Lock()
         # Cursor keys permission answers by session, and a turn is serialised per conversation
         # anyway, so a single map is enough to correlate a permission request with its turn.
@@ -217,6 +219,10 @@ class CursorACPBackend:
             )
         except AcpProcessError as exc:
             raise AgentError(f"could not set mode {mode}: {exc}") from exc
+        if mode == "plan":
+            self._plan_sessions.add(session_id)
+        else:
+            self._plan_sessions.discard(session_id)
 
     # ---- prompting --------------------------------------------------------
 
@@ -297,6 +303,13 @@ class CursorACPBackend:
                 status=update.get("status", "pending"),
             )
             turn.tool_calls[call.tool_call_id] = call
+            if call.kind == "execute" and session_id in self._plan_sessions:
+                log.warning(
+                    "cursor emitted execute in plan session %s (%s); "
+                    "CLI may have bypassed plan mode — re-run tools.acp_probe plan-mcp",
+                    session_id,
+                    call.title,
+                )
             if turn.on_progress is not None:
                 stage = _KIND_TO_STAGE.get(call.kind, "executing_tool")
                 await turn.on_progress(stage, call.title or None)

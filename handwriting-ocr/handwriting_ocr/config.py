@@ -19,7 +19,8 @@ DEFAULT_PORT = 17494
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    host: str = "0.0.0.0"
+    # Loopback by default: Core and OCR share 10.0.7.49. Override OCR_HOST only if they split.
+    host: str = "127.0.0.1"
     port: int = DEFAULT_PORT
     token: str = ""
 
@@ -58,7 +59,10 @@ def from_env(env: Mapping[str, str] | None = None) -> Settings:
     defaults = Settings()
 
     def text(name: str, fallback: str) -> str:
-        return source.get(ENV_PREFIX + name, fallback)
+        raw = source.get(ENV_PREFIX + name)
+        if raw is None or not raw.strip():
+            return fallback
+        return raw
 
     def number(name: str, fallback: int) -> int:
         raw = source.get(ENV_PREFIX + name)

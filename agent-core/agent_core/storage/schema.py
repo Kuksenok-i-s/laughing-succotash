@@ -354,4 +354,115 @@ MIGRATIONS: list[tuple[str, str]] = [
             ON contacts(operation_id) WHERE operation_id IS NOT NULL;
         """,
     ),
+    (
+        # Trainer journal: per-Telegram-user long-term store for athletes, programmes,
+        # scheduled sessions and structured workout logs. Distinct from the evening diary.
+        "0009_training",
+        """
+        CREATE TABLE IF NOT EXISTS training_profiles (
+            user_id     TEXT PRIMARY KEY,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS training_athletes (
+            athlete_id    TEXT PRIMARY KEY,
+            user_id       TEXT NOT NULL,
+            display_name  TEXT NOT NULL,
+            aliases       TEXT NOT NULL DEFAULT '[]',
+            note          TEXT,
+            is_self       INTEGER NOT NULL DEFAULT 0,
+            status        TEXT NOT NULL DEFAULT 'active',
+            operation_id  TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_training_athletes_user
+            ON training_athletes(user_id, status, display_name);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_training_athletes_operation
+            ON training_athletes(operation_id) WHERE operation_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS training_programs (
+            program_id    TEXT PRIMARY KEY,
+            user_id       TEXT NOT NULL,
+            athlete_id    TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            goal          TEXT,
+            days_per_week INTEGER,
+            weekly_plan   TEXT NOT NULL DEFAULT '[]',
+            notes         TEXT,
+            status        TEXT NOT NULL DEFAULT 'active',
+            started_on    TEXT,
+            ended_on      TEXT,
+            operation_id  TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_training_programs_athlete
+            ON training_programs(user_id, athlete_id, status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_training_programs_operation
+            ON training_programs(operation_id) WHERE operation_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS training_sessions (
+            session_id    TEXT PRIMARY KEY,
+            user_id       TEXT NOT NULL,
+            athlete_id    TEXT NOT NULL,
+            program_id    TEXT,
+            local_date    TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            plan          TEXT NOT NULL DEFAULT '[]',
+            notes         TEXT,
+            status        TEXT NOT NULL DEFAULT 'planned',
+            operation_id  TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_training_sessions_athlete_date
+            ON training_sessions(user_id, athlete_id, local_date);
+        CREATE INDEX IF NOT EXISTS idx_training_sessions_user_date
+            ON training_sessions(user_id, local_date);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_training_sessions_operation
+            ON training_sessions(operation_id) WHERE operation_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS training_logs (
+            log_id        TEXT PRIMARY KEY,
+            user_id       TEXT NOT NULL,
+            athlete_id    TEXT NOT NULL,
+            session_id    TEXT,
+            local_date    TEXT NOT NULL,
+            title         TEXT,
+            raw_text      TEXT,
+            exercises     TEXT NOT NULL DEFAULT '[]',
+            notes         TEXT,
+            duration_minutes INTEGER,
+            operation_id  TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_training_logs_athlete_date
+            ON training_logs(user_id, athlete_id, local_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_training_logs_user_date
+            ON training_logs(user_id, local_date DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_training_logs_operation
+            ON training_logs(operation_id) WHERE operation_id IS NOT NULL;
+        """,
+    ),
+    (
+        "0010_training_mode",
+        """
+        ALTER TABLE training_profiles ADD COLUMN mode TEXT NOT NULL DEFAULT 'self';
+        UPDATE training_profiles SET mode = 'trainer'
+        WHERE user_id IN (
+            SELECT user_id FROM training_athletes WHERE is_self = 0
+        );
+        """,
+    ),
+    (
+        "0011_training_progress",
+        """
+        ALTER TABLE training_programs ADD COLUMN total_sessions INTEGER;
+        ALTER TABLE training_programs ADD COLUMN weeks INTEGER;
+        """,
+    ),
 ]

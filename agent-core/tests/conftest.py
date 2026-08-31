@@ -97,6 +97,13 @@ class FakeGateway:
             if method == "telegram.send"
         ]
 
+    def documents(self) -> list[dict]:
+        return [
+            params
+            for method, params in self.delivered
+            if method == "telegram.send_document"
+        ]
+
     def confirms(self) -> list[dict]:
         return [
             params
@@ -124,6 +131,7 @@ class FakeBackend:
         self.contexts: list = []
         self.sessions: list[str] = []
         self.cancelled: list[str] = []
+        self.modes: list[tuple[str, str]] = []
         self.started = False
         self._counter = 0
 
@@ -169,7 +177,7 @@ class FakeBackend:
         self.cancelled.append(session_id)
 
     async def set_mode(self, session_id, mode) -> None:
-        pass
+        self.modes.append((session_id, mode))
 
 
 @pytest.fixture

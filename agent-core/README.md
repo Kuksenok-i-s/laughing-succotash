@@ -10,7 +10,7 @@ which is why the Mac needs no port forwarding, no VPN and no reverse tunnel.
 
 Everything that is not Telegram transport: conversation sessions, transcription, hierarchical
 analysis of recordings, the MCP tool surface (reminders, calendar, tasks, notes, memory, contacts, diary,
-timers, system status), the permission model and confirmation flow, the scheduler, and all durable
+trainer journal, timers, system status), the permission model and confirmation flow, the scheduler, and all durable
 state.
 
 ## Layout
@@ -34,6 +34,7 @@ agent_core/
 ├── scheduler/         reminders, timers, evening journal, expiry, cleanup
 ├── reminders/         buttoned follow-up after a fire (done / snooze / reschedule)
 ├── journal/           evening check-in (work + personal) and the month-end summary
+├── training/          trainer-journal skill seeded into each user workspace
 ├── calendar/          CalendarProvider protocol + local SQLite implementation
 ├── rpc/               the outbound link and the Gateway-facing handlers
 └── storage/           SQLite schema, migrations, repositories
@@ -64,10 +65,13 @@ READ/SAFE_WRITE/DANGEROUS by parsing that would be fragile and security-critical
 decision is made in-process with exact tool names and validated Pydantic arguments. See
 [`../docs/cursor-acp.md`](../docs/cursor-acp.md).
 
-**The chat session runs in a sandbox directory.** Cursor's built-in file writes and shell commands
-do *not* trigger a permission request — this was verified, not assumed — so the conversation session
-is rooted in a throwaway workspace, and coding work happens only in allowlisted project paths, in
-`plan` mode when the project is not writable.
+**The chat session runs in a sandbox directory and Cursor `plan` mode.** Cursor's built-in file
+writes and shell commands do *not* trigger a permission request — this was verified, not assumed —
+so the conversation session is rooted in `DATA_DIR/user_{tg_id}` and forced into `plan` (MCP tools
+still work; see `tools.acp_probe plan-mcp`). Creating a file the user can download is an MCP
+capability, `file_send`: it writes UTF-8 into that sandbox and the Gateway renders it as a
+Telegram document. Coding work happens only in allowlisted project paths, in `plan` mode when the
+project is not writable.
 
 **Provenance decides whether a write may run unattended.** A reminder the user asked for is created
 immediately; the same reminder inferred from a meeting recording asks first. Provenance is set by

@@ -1,0 +1,28 @@
+# YouTube download via the gateway VPS (example).
+# Copy to DATA_DIR/youtube/config.toml and fill in paths. Never commit cookies or keys.
+#
+# On the VPS:
+#   - system user `ytdl` (not root, not assistant)
+#   - work dir /var/lib/telegram-gateway/youtube/work
+#   - cookies /var/lib/telegram-gateway/youtube/cookies.txt mode 600
+#   - yt-dlp in /var/lib/telegram-gateway/youtube/venv (pinned version below)
+#
+# On Core:
+#   ssh-keyscan -t ed25519 45.148.60.90 >> DATA_DIR/youtube/known_hosts
+
+[paths]
+base = "/home/ilya/bulk/assistant/youtube"
+transcripts = "/home/ilya/bulk/assistant/youtube/transcripts"
+videos = "/home/ilya/bulk/assistant/youtube/videos"
+ssh_key = "/home/ilya/bulk/assistant/youtube/id_ed25519_ytdl"
+cookies = "/home/ilya/bulk/assistant/youtube/cookies.txt"
+known_hosts = "/home/ilya/bulk/assistant/youtube/known_hosts"
+
+[download]
+remote = "ytdl@45.148.60.90"
+remote_dir = "/var/lib/telegram-gateway/youtube/work"
+cookies = "/var/lib/telegram-gateway/youtube/cookies.txt"
+ytdlp_bin = "/var/lib/telegram-gateway/youtube/venv/bin/yt-dlp"
+ytdlp_version = "2026.08.19"
+format = "bv*[height<=1080]+ba/b[height<=1080]/b"
+max_videos = 40

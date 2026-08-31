@@ -281,6 +281,10 @@ class McpServer:
 
         normalised = validated.model_dump(mode="json", exclude_none=True)
         decision = decide(name, context)
+        log.info(
+            "mcp %s user=%s job=%s decision=%s",
+            name, context.user_id, context.job_id, decision.value,
+        )
 
         if decision is Decision.DENY:
             return self._tool_result(

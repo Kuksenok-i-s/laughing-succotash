@@ -36,6 +36,10 @@ _AUDIO_SUFFIXES = {".mp3", ".m4a", ".opus", ".ogg", ".wav", ".webm"}
 _YTDLP_ID_SUFFIX = re.compile(r" \[[\w-]{11}\]$")
 # Netscape cookies for yt-dlp. Lives on the proxy, never under /tmp.
 _DEFAULT_REMOTE_COOKIES = "/var/lib/telegram-gateway/youtube/cookies.txt"
+_DEFAULT_REMOTE_DIR = "/var/lib/telegram-gateway/youtube/work"
+# Pin must match the ytdl user's venv on the VPS (see docs/operations.md).
+_DEFAULT_YTDLP_VERSION = "2026.08.19"
+_DEFAULT_YTDLP_BIN = "/var/lib/telegram-gateway/youtube/venv/bin/yt-dlp"
 
 
 class YoutubeError(RuntimeError):
@@ -44,6 +48,20 @@ class YoutubeError(RuntimeError):
 
 def _title_from_ytdlp_stem(stem: str) -> str:
     return _YTDLP_ID_SUFFIX.sub("", stem)
+
+
+def _refuse_root_remote(remote: str) -> None:
+    """YouTube SSH must not be root — cookies and transit live under a dedicated ytdl user."""
+    text = (remote or "").strip()
+    if not text:
+        raise YoutubeError("youtube download.remote is empty")
+    user, sep, _host = text.partition("@")
+    if not sep:
+        user = text
+    if user.strip().lower() == "root":
+        raise YoutubeError(
+            "refusing SSH as root@ for YouTube; use the dedicated ytdl user"
+        )
 
 
 def _rename_library_video(
@@ -148,7 +166,11 @@ class YoutubeDownloader:
         max_videos: int = 40,
         cookies: str | None = None,
         local_cookies: Path | None = None,
+        known_hosts: Path | None = None,
+        ytdlp_version: str | None = _DEFAULT_YTDLP_VERSION,
+        ytdlp_bin: str = _DEFAULT_YTDLP_BIN,
     ) -> None:
+        _refuse_root_remote(remote)
         _refuse_tmp(remote_dir)
         if cookies:
             _refuse_tmp(cookies)
@@ -162,6 +184,12 @@ class YoutubeDownloader:
         self.max_videos = max(1, max_videos)
         self._cookies = cookies
         self._local_cookies = local_cookies.expanduser() if local_cookies else None
+        self._known_hosts = (
+            known_hosts.expanduser().resolve() if known_hosts is not None else None
+        )
+        self._ytdlp_version = (ytdlp_version or "").strip() or None
+        self._ytdlp_bin = (ytdlp_bin or _DEFAULT_YTDLP_BIN).strip() or _DEFAULT_YTDLP_BIN
+        self._ytdlp_checked = False
         # One yt-dlp on the VPS: playlists walk items sequentially, and concurrent jobs wait.
         self._vps = threading.Lock()
         self._proxy_slot = asyncio.Lock()
@@ -184,6 +212,11 @@ class YoutubeDownloader:
         remote = download.get("remote")
         if not remote:
             return None
+        try:
+            _refuse_root_remote(str(remote))
+        except YoutubeError as exc:
+            log.error("%s", exc)
+            return None
         paths = cfg.get("paths") or {}
         key = Path(paths.get("ssh_key") or "")
         if not key:
@@ -199,9 +232,17 @@ class YoutubeDownloader:
         remote_cookies = str(download.get("cookies") or "") or None
         if remote_cookies is None and local_cookies is not None:
             remote_cookies = _DEFAULT_REMOTE_COOKIES
+        known_raw = paths.get("known_hosts")
+        known_hosts = Path(str(known_raw)).expanduser() if known_raw else None
+        if known_hosts is None:
+            candidate = path.parent / "known_hosts"
+            if candidate.is_file():
+                known_hosts = candidate
+        ytdlp_version = str(download.get("ytdlp_version") or _DEFAULT_YTDLP_VERSION)
+        ytdlp_bin = str(download.get("ytdlp_bin") or _DEFAULT_YTDLP_BIN)
         return cls(
             remote=str(remote),
-            remote_dir=str(download.get("remote_dir") or "/root/ytdl"),
+            remote_dir=str(download.get("remote_dir") or _DEFAULT_REMOTE_DIR),
             ssh_key=key,
             transcripts_dir=Path(paths.get("transcripts") or (base / "transcripts")),
             videos_dir=Path(paths.get("videos") or (base / "videos")),
@@ -211,21 +252,53 @@ class YoutubeDownloader:
             ),
             cookies=remote_cookies,
             local_cookies=local_cookies,
+            known_hosts=known_hosts,
+            ytdlp_version=ytdlp_version,
+            ytdlp_bin=ytdlp_bin,
         )
 
     def _ssh(self) -> list[str]:
-        return [
+        # -F none skips /etc/ssh/ssh_config. A systemd user unit with ReadOnlyPaths
+        # enters a mount namespace; OpenSSH then rejects the distro snippet
+        # 20-systemd-ssh-proxy.conf ("Bad owner or permissions") and never reaches yt-dlp.
+        cmd = [
             "ssh",
+            "-F",
+            "none",
             "-i",
             str(self._ssh_key),
             "-o",
             "BatchMode=yes",
             "-o",
+            "IdentitiesOnly=yes",
+            "-o",
             "ConnectTimeout=20",
             "-o",
-            "StrictHostKeyChecking=accept-new",
-            self._remote,
+            "StrictHostKeyChecking=yes",
         ]
+        if self._known_hosts is not None:
+            cmd.extend(["-o", f"UserKnownHostsFile={self._known_hosts}"])
+        cmd.append(self._remote)
+        return cmd
+
+    def _ensure_ytdlp_version(self) -> None:
+        if self._ytdlp_checked or not self._ytdlp_version:
+            return
+        proc = subprocess.run(
+            [*self._ssh(), f"{shlex.quote(self._ytdlp_bin)} --version"],
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "yt-dlp --version failed").strip()
+            raise YoutubeError(err[:500])
+        remote_version = (proc.stdout or "").strip().splitlines()[0].strip()
+        if remote_version != self._ytdlp_version:
+            raise YoutubeError(
+                f"yt-dlp on proxy is {remote_version!r}, expected {self._ytdlp_version!r}"
+            )
+        self._ytdlp_checked = True
+        log.info("proxy yt-dlp version %s ok", remote_version)
 
     def _pull_dir(self, remote_job: str, dest_dir: Path) -> None:
         """Copy the remote job directory onto the Core.
@@ -298,6 +371,7 @@ class YoutubeDownloader:
         quoted_job = shlex.quote(remote_job)
         dest_dir.mkdir(parents=True, exist_ok=True)
         with self._vps:
+            self._ensure_ytdlp_version()
             self._sync_cookies()
             proc = subprocess.run(
                 [*self._ssh(), remote_cmd],
@@ -340,11 +414,12 @@ class YoutubeDownloader:
         quoted_url = shlex.quote(url)
         fmt = shlex.quote(self._audio_format)
         quoted_out = shlex.quote(f"{remote_job}/%(title)s [%(id)s].%(ext)s")
+        ytdlp = shlex.quote(self._ytdlp_bin)
         # One watch URL, audio only: the Core transcribes; video would only fill the proxy disk.
         # The yt-dlp template must be quoted: bash otherwise treats %(id)s as a subshell.
         return (
             f"mkdir -p {quoted_job} && "
-            f"yt-dlp --no-playlist {self._cookie_args()}"
+            f"{ytdlp} --no-playlist {self._cookie_args()}"
             f"-f ba/bestaudio/best -x --audio-format {fmt} "
             f"--write-info-json --no-progress "
             f"-o {quoted_out} {quoted_url}"
@@ -472,8 +547,9 @@ class YoutubeDownloader:
 
     def _list_remote_cmd(self, url: str) -> str:
         quoted_url = shlex.quote(url)
+        ytdlp = shlex.quote(self._ytdlp_bin)
         return (
-            f"yt-dlp --flat-playlist --playlist-end {self.max_videos} "
+            f"{ytdlp} --flat-playlist --playlist-end {self.max_videos} "
             f"--no-download -J --no-progress --ignore-errors "
             f"{self._cookie_args()}{quoted_url}"
         )
@@ -481,6 +557,7 @@ class YoutubeDownloader:
     def _list_entries(self, url: str) -> tuple[str, list[str]]:
         _refuse_tmp(self._remote_dir)
         with self._vps:
+            self._ensure_ytdlp_version()
             self._sync_cookies()
             proc = subprocess.run(
                 [*self._ssh(), self._list_remote_cmd(url)],
@@ -508,9 +585,10 @@ class YoutubeDownloader:
         quoted_url = shlex.quote(url)
         quoted_fmt = shlex.quote(self._video_format)
         quoted_out = shlex.quote(f"{remote_job}/%(title)s [%(id)s].%(ext)s")
+        ytdlp = shlex.quote(self._ytdlp_bin)
         return (
             f"mkdir -p {quoted_job} && "
-            f"yt-dlp --no-playlist {self._cookie_args()}"
+            f"{ytdlp} --no-playlist {self._cookie_args()}"
             f"-f {quoted_fmt} "
             f"--merge-output-format mp4 --write-info-json --no-progress "
             f"-o {quoted_out} {quoted_url}"

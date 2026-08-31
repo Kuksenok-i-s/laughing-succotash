@@ -21,6 +21,7 @@ from .assistant import (
 )
 from .conversations import Conversation, ConversationRepository, CursorSession, User
 from .journal import JournalEntry, JournalRepository, JournalSummary
+from .training import TrainingRepository
 from .events import OutboundEvent, OutboundEventRepository
 from .jobs import Job, JobRepository, TranscriptionMetadataRepository, Upload, UploadRepository
 
@@ -47,6 +48,7 @@ __all__ = [
     "Repositories",
     "TaskRepository",
     "TimerRepository",
+    "TrainingRepository",
     "TranscriptionMetadataRepository",
     "Upload",
     "UploadRepository",
@@ -71,6 +73,7 @@ class Repositories:
     calendar: CalendarRepository
     pending_actions: PendingActionRepository
     operations: OperationLedger
+    training: TrainingRepository
 
     @classmethod
     def build(cls, db: Database, default_timezone: str) -> "Repositories":
@@ -90,4 +93,5 @@ class Repositories:
             calendar=CalendarRepository(db),
             pending_actions=PendingActionRepository(db),
             operations=OperationLedger(db),
+            training=TrainingRepository(db),
         )

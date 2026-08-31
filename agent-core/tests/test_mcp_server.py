@@ -91,7 +91,9 @@ async def test_lists_tools_with_schemas(mcp) -> None:
     assert status == 200
     names = {tool["name"] for tool in body["result"]["tools"]}
     assert {"reminder_create", "calendar_list", "note_search", "memory_remember",
-            "contact_create"} <= names
+            "contact_create", "file_send", "file_list", "file_read",
+            "training_log_save", "training_athlete_list", "training_export",
+            "training_profile_get", "training_profile_set", "training_progress"} <= names
     # A generic shell escape hatch would defeat the whole capability model.
     assert not any("shell" in name or "exec" in name for name in names)
 
@@ -316,6 +318,238 @@ async def test_replaying_a_contact_operation_id_does_not_create_twice(mcp, repos
 
     assert first["contact_id"] == second["contact_id"]
     assert len(await repos.contacts.search("tg:1", "петя")) == 1
+
+
+async def test_training_log_save_persists_and_remembers_the_journal(mcp, repos) -> None:
+    server, contexts, confirmations = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+
+    payload, is_error = await client.call_tool(
+        "training_log_save",
+        {
+            "athlete_name": "Вася",
+            "local_date": "2026-08-30",
+            "raw_text": "присед 4 по 8 на 80",
+            "exercises": [
+                {"name": "Присед", "sets": [{"reps": 8, "weight_kg": 80} for _ in range(4)]}
+            ],
+            "operation_id": "op-train-1",
+        },
+    )
+
+    assert not is_error and payload["created"] is True
+    assert payload["athlete_name"] == "Вася"
+    assert payload["exercises"][0]["sets"][0]["weight_kg"] == 80
+    assert payload["progress"]["done"] == 1
+    assert "проведено 1" in payload["progress"]["label"]
+    assert confirmations.requests == []
+    assert await repos.training.is_enabled("tg:1") is True
+    profile = await repos.training.get_profile("tg:1")
+    assert profile is not None and profile["mode"] == "trainer"
+    memories = await repos.memory.search("tg:1", "журнал тренировок")
+    assert len(memories) == 1
+    assert memories[0]["category"] == "training"
+
+
+async def test_training_progress_counts_done_and_remaining(mcp, repos) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+
+    program, is_error = await client.call_tool(
+        "training_program_upsert",
+        {
+            "athlete_name": "Вася",
+            "title": "Сила 4 недели",
+            "days_per_week": 3,
+            "weeks": 4,
+            "started_on": "2026-08-01",
+            "operation_id": "prog-len",
+        },
+    )
+    assert not is_error
+    assert program["total_sessions"] == 12
+    assert program["progress"]["remaining"] == 12
+
+    log, is_error = await client.call_tool(
+        "training_log_save",
+        {
+            "athlete_name": "Вася",
+            "local_date": "2026-08-30",
+            "exercises": [{"name": "Присед", "sets": [{"reps": 5, "weight_kg": 100}]}],
+            "operation_id": "log-len",
+        },
+    )
+    assert not is_error
+    assert log["progress"]["done"] == 1
+    assert log["progress"]["remaining"] == 11
+    assert log["progress"]["label"] == "проведено 1 из 12, осталось 11"
+
+    payload, is_error = await client.call_tool(
+        "training_progress", {"athlete_name": "Вася"}
+    )
+    assert not is_error
+    assert payload["progress"]["done"] == 1
+    assert payload["progress"]["remaining"] == 11
+
+
+async def test_training_log_from_a_recording_asks_first(mcp, repos) -> None:
+    server, contexts, confirmations = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.UNTRUSTED_CONTENT))
+
+    payload, _ = await Client(server, token).call_tool(
+        "training_log_save",
+        {
+            "athlete_name": "Вася",
+            "local_date": "2026-08-30",
+            "exercises": [{"name": "Жим", "sets": [{"reps": 5, "weight_kg": 60}]}],
+            "operation_id": "op-train-untrusted",
+        },
+    )
+
+    assert payload["created"] is True
+    assert [item["tool_name"] for item in confirmations.requests] == ["training_log_save"]
+
+
+async def test_ambiguous_athletes_are_never_guessed(mcp, repos) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+
+    await client.call_tool(
+        "training_athlete_upsert",
+        {"display_name": "Саша Иванов", "operation_id": "ta-1"},
+    )
+    await client.call_tool(
+        "training_athlete_upsert",
+        {"display_name": "Саша Петров", "operation_id": "ta-2"},
+    )
+    payload, _ = await client.call_tool(
+        "training_log_save",
+        {
+            "athlete_name": "Саша",
+            "local_date": "2026-08-30",
+            "exercises": [{"name": "Присед", "sets": [{"reps": 5, "weight_kg": 100}]}],
+            "operation_id": "ta-log",
+        },
+    )
+
+    assert payload["error"] == "ambiguous"
+    assert len(payload["athletes"]) == 2
+    assert await repos.training.list_logs("tg:1") == []
+
+
+async def test_self_mode_logs_without_a_name_to_the_user(mcp, repos) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+
+    payload, is_error = await client.call_tool(
+        "training_log_save",
+        {
+            "local_date": "2026-08-30",
+            "exercises": [{"name": "Присед", "sets": [{"reps": 5, "weight_kg": 80}]}],
+            "operation_id": "self-log",
+        },
+    )
+
+    assert not is_error and payload["created"] is True
+    assert payload["mode"] == "self"
+    assert payload["athlete_name"] == "я"
+    athletes = await repos.training.list_athletes("tg:1")
+    assert len(athletes) == 1 and athletes[0]["is_self"] is True
+
+
+async def test_trainer_mode_refuses_a_log_without_an_athlete(mcp, repos) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+
+    await client.call_tool(
+        "training_profile_set", {"mode": "trainer", "operation_id": "mode-t"}
+    )
+    payload, is_error = await client.call_tool(
+        "training_log_save",
+        {
+            "local_date": "2026-08-30",
+            "exercises": [{"name": "Жим", "sets": [{"reps": 5, "weight_kg": 60}]}],
+            "operation_id": "trainer-anon",
+        },
+    )
+
+    assert not is_error
+    assert payload["error"] == "athlete_required"
+    assert payload["mode"] == "trainer"
+    assert await repos.training.list_logs("tg:1") == []
+
+
+async def test_trainer_mode_keeps_a_separate_schedule_per_athlete(mcp, repos) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+
+    await client.call_tool("training_profile_set", {"mode": "trainer", "operation_id": "m"})
+    vasya, _ = await client.call_tool(
+        "training_schedule_upsert",
+        {
+            "athlete_name": "Вася",
+            "local_date": "2026-09-01",
+            "title": "Ноги",
+            "operation_id": "s-v",
+        },
+    )
+    masha, _ = await client.call_tool(
+        "training_schedule_upsert",
+        {
+            "athlete_name": "Маша",
+            "local_date": "2026-09-01",
+            "title": "Жим",
+            "operation_id": "s-m",
+        },
+    )
+
+    assert vasya["mode"] == "trainer" and masha["mode"] == "trainer"
+    assert vasya["athlete_id"] != masha["athlete_id"]
+    listed, _ = await client.call_tool(
+        "training_schedule_list", {"date_from": "2026-09-01", "date_to": "2026-09-01"}
+    )
+    assert listed["count"] == 2
+    names = {item["athlete_name"] for item in listed["sessions"]}
+    assert names == {"Вася", "Маша"}
+
+
+async def test_training_export_returns_csv_without_sending(mcp, repos) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_token("conv")
+    contexts.set_current("conv", _ctx(Provenance.DIRECT_COMMAND))
+    client = Client(server, token)
+
+    await client.call_tool(
+        "training_log_save",
+        {
+            "athlete_name": "Вася",
+            "local_date": "2026-08-30",
+            "exercises": [{"name": "Жим", "sets": [{"reps": 5, "weight_kg": 70}]}],
+            "operation_id": "exp-1",
+        },
+    )
+    payload, is_error = await client.call_tool(
+        "training_export",
+        {"kind": "logs", "send": False, "operation_id": "exp-csv"},
+    )
+
+    assert not is_error
+    assert payload["sent"] == []
+    assert "Жим" in payload["files"][0]["csv"]
+    assert "70" in payload["files"][0]["csv"]
 
 
 def _ctx(provenance: Provenance) -> ToolContext:

@@ -17,10 +17,11 @@ Cursor's built-in file writes or shell commands.
 **Three tiers.**
 
 - `READ` — executed automatically. `calendar_list`, `calendar_find_free_slots`, `task_list`,
-  `note_search`, `memory_search`, `contact_search`, `system_status`, `web_search`.
+  `note_search`, `memory_search`, `contact_search`, `system_status`, `web_search`, `file_list`,
+  `file_read`.
 - `SAFE_WRITE` — executed without asking **only when it originates from a direct user
   instruction**. `reminder_create`, `task_create`, `note_create`, `calendar_create`,
-  `contact_create`.
+  `contact_create`, `file_send`.
 - `DANGEROUS` — always confirmed. `calendar_delete`, `task_delete`, `note_delete`,
   `memory_forget`, and any destructive filesystem operation.
 
@@ -37,9 +38,11 @@ handler the tool name is exact and arguments are Pydantic-validated. The ACP cal
 coarse first layer that admits our own server and rejects unknown ones.
 
 Because built-in writes and shell bypass permissions entirely, the assistant conversation session
-runs with `cwd` set to a dedicated sandbox directory holding nothing sensitive. Coding sessions are
-confined to allowlisted project paths, and projects marked `writable: false` use ACP `plan` mode,
-which was verified to genuinely refuse writes and shell execution.
+runs with `cwd` set to a dedicated sandbox directory holding nothing sensitive, **and** in Cursor
+`plan` mode (verified to refuse built-in write/shell while still allowing MCP tools — see
+`tools.acp_probe plan-mcp`). Coding sessions are confined to allowlisted project paths, and
+projects marked `writable: false` use ACP `plan` mode; `writable: true` would use `agent` mode.
+Telegram chat never opens coding projects through `SessionManager`.
 
 ## Consequences
 

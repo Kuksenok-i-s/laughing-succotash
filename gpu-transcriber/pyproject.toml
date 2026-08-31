@@ -3,7 +3,7 @@ name = "gpu-transcriber"
 version = "1.0.0"
 description = "Transcription service: HTTP API in front of a warm faster-whisper model"
 requires-python = ">=3.12"
-dependencies = ["faster-whisper>=1.0"]
+dependencies = ["faster-whisper==1.2.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

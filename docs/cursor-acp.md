@@ -177,8 +177,10 @@ Two consequences drive the whole security design:
 
 1. The permission model cannot be enforced through ACP for Cursor's *built-in* tools. The
    assistant conversation session therefore runs with `cwd` set to a dedicated throwaway sandbox
-   directory containing nothing sensitive, and coding sessions are confined to explicitly
-   allowlisted project paths (`plan` mode when not writable).
+   directory containing nothing sensitive, **and** `session/set_mode` to `plan` after every
+   `session/new` / successful `session/load` (see `assistant/sessions.py`). `plan` refuses
+   built-in write/shell but still allows MCP (verified by `tools.acp_probe plan-mcp`). Coding
+   sessions are confined to explicitly allowlisted project paths (`plan` when not writable).
 2. Permission enforcement for *assistant capabilities* is reliable, because every one of those
    capabilities is an MCP tool. See below for why the gate is nonetheless placed inside the MCP
    server rather than in the ACP permission callback.
@@ -256,8 +258,9 @@ but it does identify the offending field path.
 | Cancellation | works, session stays usable | `/cancel` command |
 | Tool calls visible to client | works | `job.progress` stages |
 | Permission prompts — MCP tools | works | Layer 1 gate |
-| Permission prompts — built-in write/shell | **absent** | forces sandbox cwd |
-| Read-only enforcement | works via `plan` mode | non-writable projects |
+| Permission prompts — built-in write/shell | **absent** | forces sandbox cwd + plan mode |
+| Read-only enforcement | works via `plan` mode | chat sessions + non-writable projects |
+| MCP tools usable in `plan` mode | works (`plan-mcp` probe) | Telegram chat uses plan |
 | Workspaces | per-session `cwd` | project allowlist |
 | MCP over stdio | works | not used |
 | MCP over HTTP | works (`type` + `headers` required) | `mcp/server.py` |
@@ -282,6 +285,7 @@ python -m tools.acp_probe initialize      # or run one
 | `resume` | `session/load` across two processes, and that context survived |
 | `cancel` | The turn stops and the session is still usable afterwards |
 | `plan-mode` | `plan` mode really refuses to write to disk |
+| `plan-mcp` | In `plan` mode MCP `tools/call` still reaches a local HTTP server; execute does not fire |
 | `permissions` | MCP calls ask; built-in writes do not |
 | `mcp-http` | The strict `type` + `headers` shape, and that the loose forms are still rejected |
 

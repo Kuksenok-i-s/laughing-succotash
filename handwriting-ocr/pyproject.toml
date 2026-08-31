@@ -3,7 +3,7 @@ name = "handwriting-ocr"
 version = "1.0.0"
 description = "Handwriting OCR service: two-pass Qwen3-VL via Ollama behind an HTTP API"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["Pillow==12.3.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

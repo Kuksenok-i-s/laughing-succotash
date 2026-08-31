@@ -29,7 +29,13 @@ RestartSec=5
 
 # Soft containment for Cursor's built-in shell (ACP does not permission it): the agent process
 # must not rewrite its own source tree or secrets. Per-user DATA_DIR/user_* isolation is enforced
-# in ACP fs/*; this only hardens the remaining shell path.
+# in ACP fs/*; chat sessions additionally run in Cursor plan mode (see assistant/sessions.py).
+# Hardening mirrors the GPU units; ProtectHome is intentionally omitted — Cursor CLI, .env and
+# DATA_DIR live under $HOME.
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+PrivateTmp=true
 ReadOnlyPaths=%h/tg_bot_kirpich
 ReadOnlyPaths=%h/agent-core/.env
 ReadOnlyPaths=%h/.config/systemd/user/agent-core.service

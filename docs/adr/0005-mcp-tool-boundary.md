@@ -4,8 +4,9 @@ Status: accepted
 
 ## Context
 
-Cursor needs to create reminders, read the calendar, manage tasks and notes, search memory and
-look up contacts. It must not acquire a general-purpose remote-execution primitive in the process.
+Cursor needs to create reminders, read the calendar, manage tasks and notes, send files to
+Telegram, search memory and look up contacts. It must not acquire a general-purpose
+remote-execution primitive in the process.
 
 ## Decision
 

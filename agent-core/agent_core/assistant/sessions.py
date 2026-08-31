@@ -9,7 +9,8 @@ which conversation — and therefore which user — a tool call belongs to, inst
 ``user_id`` argument the model could invent.
 
 The Cursor session ``cwd`` is the per-user directory ``DATA_DIR/user_{tg_id}``: the agent may
-only touch files there (enforced again on ACP ``fs/*``).
+only touch files there (enforced again on ACP ``fs/*``). Chat sessions also run in Cursor
+``plan`` mode so built-in shell/write stay blocked; MCP tools still work.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from ..agent.base import AgentBackend, AgentContext, AgentError
 from ..storage.repositories import ConversationRepository, CursorSession
+from ..training.skill import seed_into as seed_trainer_skill
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ class SessionManager:
         replaced — history in Cursor does not migrate; SQLite memory and reminders do.
         """
         target = self._user_workspace(user_id)
+        seed_trainer_skill(target)
 
         async with self._lock(conversation_id):
             record = await self._conversations.find_session_by_workspace(
@@ -81,6 +84,7 @@ class SessionManager:
                 token = self._token_for(conversation_id)
                 resumed = await self._resume(record, target, token)
                 if resumed:
+                    await self._apply_chat_mode(record.external_id)
                     return record, False
                 log.info(
                     "cursor session %s could not be resumed; starting a new one",
@@ -88,7 +92,23 @@ class SessionManager:
                 )
                 await self._conversations.close_session(record.session_id)
 
-            return await self._create(conversation_id, target), True
+            created = await self._create(conversation_id, target)
+            await self._apply_chat_mode(created.external_id)
+            return created, True
+
+    async def _apply_chat_mode(self, session_id: str) -> None:
+        """Telegram chat sessions run in plan mode so built-in shell/write stay blocked.
+
+        MCP tools still work in plan (verified by tools.acp_probe plan-mcp). Coding workspaces
+        with writable=true would use agent mode — those are not opened through SessionManager.
+        """
+        set_mode = getattr(self._backend, "set_mode", None)
+        if set_mode is None or not session_id:
+            return
+        try:
+            await set_mode(session_id, "plan")
+        except AgentError as exc:
+            log.warning("could not set plan mode on session %s: %s", session_id, exc)
 
     async def _resume(self, record: CursorSession, workspace: Path, token: str) -> bool:
         resume = getattr(self._backend, "resume_session", None)

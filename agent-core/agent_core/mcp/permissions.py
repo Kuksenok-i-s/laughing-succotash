@@ -42,6 +42,7 @@ class ToolContext:
     provenance: Provenance = Provenance.DIRECT_COMMAND
     job_id: str | None = None
     chat_id: int | None = None
+    message_id: int | None = None
     timezone: tzinfo | None = None
     now: datetime | None = None
 
@@ -76,6 +77,16 @@ TIERS: dict[str, Tier] = {
     "system_disk": Tier.READ,
     "web_search": Tier.READ,
     "web_fetch": Tier.READ,
+    "file_list": Tier.READ,
+    "file_read": Tier.READ,
+    "training_athlete_list": Tier.READ,
+    "training_athlete_get": Tier.READ,
+    "training_program_list": Tier.READ,
+    "training_progress": Tier.READ,
+    "training_schedule_list": Tier.READ,
+    "training_log_list": Tier.READ,
+    "training_log_get": Tier.READ,
+    "training_profile_get": Tier.READ,
     # --- safe write ---
     "reminder_create": Tier.SAFE_WRITE,
     "reminder_update": Tier.SAFE_WRITE,
@@ -92,11 +103,19 @@ TIERS: dict[str, Tier] = {
     "memory_remember": Tier.SAFE_WRITE,
     "contact_create": Tier.SAFE_WRITE,
     "contact_update": Tier.SAFE_WRITE,
+    "file_send": Tier.SAFE_WRITE,
+    "training_athlete_upsert": Tier.SAFE_WRITE,
+    "training_program_upsert": Tier.SAFE_WRITE,
+    "training_schedule_upsert": Tier.SAFE_WRITE,
+    "training_log_save": Tier.SAFE_WRITE,
+    "training_export": Tier.SAFE_WRITE,
+    "training_profile_set": Tier.SAFE_WRITE,
     # --- dangerous ---
     "calendar_delete": Tier.DANGEROUS,
     "task_delete": Tier.DANGEROUS,
     "note_delete": Tier.DANGEROUS,
     "memory_forget": Tier.DANGEROUS,
+    "training_athlete_archive": Tier.DANGEROUS,
 }
 
 
@@ -166,6 +185,34 @@ def describe_action(tool_name: str, arguments: dict[str, Any]) -> str:
             )
         case "timer_create":
             return f"Поставить таймер на {arguments.get('duration_seconds', 0) // 60} мин?"
+        case "file_send":
+            return f"Отправить файл «{arguments.get('filename', '')}» в чат?"
+        case "training_athlete_upsert":
+            return f"Добавить спортсмена «{arguments.get('display_name', '')}» в журнал тренера?"
+        case "training_athlete_archive":
+            return f"Архивировать спортсмена {arguments.get('athlete_id')}?"
+        case "training_program_upsert":
+            return f"Сохранить программу «{arguments.get('title', '')}»?"
+        case "training_schedule_upsert":
+            who = arguments.get("athlete_name") or arguments.get("athlete_id") or ""
+            day = arguments.get("local_date") or ""
+            title = arguments.get("title") or ""
+            suffix = f" для {who}" if who else ""
+            return f"Поставить тренировку «{title}» на {day}{suffix}?"
+        case "training_log_save":
+            who = arguments.get("athlete_name") or arguments.get("athlete_id") or ""
+            day = arguments.get("local_date") or ""
+            suffix = f" ({who})" if who else ""
+            return f"Сохранить отчёт о тренировке {day}{suffix}?"
+        case "training_export":
+            return "Отправить таблицу тренировок в чат?"
+        case "training_profile_set":
+            mode = arguments.get("mode") or ""
+            if mode == "trainer":
+                return "Включить режим тренера (группа, расписание на каждого)?"
+            if mode == "self":
+                return "Включить режим своих тренировок?"
+            return "Сменить режим журнала тренировок?"
         case _:
             return f"Выполнить действие {tool_name}?"
 

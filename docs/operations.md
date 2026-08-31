@@ -89,13 +89,39 @@ is never opened wholesale. A project listed with `writable = false` is opened in
 mode, which was verified to genuinely refuse writes (see `docs/cursor-acp.md`).
 
 Before installing the service, confirm the ACP findings still hold on this machine and this CLI
-build:
+build (re-run after every `cursor-agent` upgrade, before restarting Core):
 
 ```bash
 cd ~/agent-core-src/agent-core && python -m tools.acp_probe --all
 ```
 
 It exits non-zero and names the affected code path if a capability the Core depends on has changed.
+`plan-mcp` must stay green: Telegram chat sessions run in Cursor `plan` mode and still need MCP.
+
+## YouTube on the gateway VPS
+
+YouTube is blocked from the Core/GPU LAN, so downloads run on `45.148.60.90` over SSH and are
+pulled back. The VPS is transit only — never `/tmp`, never a library.
+
+Use a dedicated system user **`ytdl`**, not `root` and not `assistant` (assistant holds the bot
+token). Layout on the VPS:
+
+| Path | Purpose |
+| --- | --- |
+| `/var/lib/telegram-gateway/youtube/work` | Scratch job dirs (one at a time) |
+| `/var/lib/telegram-gateway/youtube/cookies.txt` | Netscape cookies, mode `600`, owner `ytdl` |
+| `/var/lib/telegram-gateway/youtube/venv` | `yt-dlp==2026.08.19` (pin; bump with config) |
+
+On the Core, copy `agent-core/youtube.config.toml.example` to `DATA_DIR/youtube/config.toml`,
+point `ssh_key` at a key whose public half is in `ytdl`'s `authorized_keys`, and pin the host
+key:
+
+```bash
+ssh-keyscan -t ed25519 45.148.60.90 >> DATA_DIR/youtube/known_hosts
+```
+
+Core refuses `remote = "root@…"` and checks `yt-dlp --version` against `download.ytdlp_version`
+before the first fetch.
 
 Then install the launch agent:
 

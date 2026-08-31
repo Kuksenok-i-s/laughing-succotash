@@ -16,10 +16,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..files import MAX_CONTENT_CHARS
 from ..search.base import guard_url
 from ..storage.repositories import Repositories
 from .permissions import ToolContext
 from .server import ToolRegistry
+from .training_tools import register_training_tools
 from .timeutil import (
     day_bounds,
     next_occurrence,
@@ -265,6 +267,31 @@ class CalendarFreeSlots(_Args):
     workday_end_hour: int = Field(default=21, ge=1, le=24)
 
 
+# ---------------------------------------------------------------- files
+
+
+class FileSend(_Args):
+    filename: str = Field(
+        description="Basename with an extension such as .md, .csv, .txt, .json or .ics.",
+        max_length=120,
+    )
+    content: str | None = Field(
+        default=None,
+        max_length=MAX_CONTENT_CHARS,
+        description="UTF-8 file body. Omit to re-send a file that already exists in the "
+        "user's folder.",
+    )
+    caption: str | None = Field(
+        default=None,
+        max_length=1024,
+        description="Short Telegram caption shown under the download chip, not the file itself.",
+    )
+
+
+class FileName(_Args):
+    filename: str
+
+
 # ---------------------------------------------------------------- registration
 
 
@@ -275,6 +302,7 @@ def register_tools(
     calendar_provider,
     scheduler=None,
     search_provider=None,
+    file_delivery=None,
 ) -> None:
     # ---- reminders ----------------------------------------------------
 
@@ -698,6 +726,53 @@ def register_tools(
         CalendarFreeSlots, calendar_find_free_slots,
     )
 
+    # ---- files --------------------------------------------------------------
+
+    async def file_send(args: FileSend, ctx: ToolContext) -> dict[str, Any]:
+        if file_delivery is None:
+            raise RuntimeError("file delivery is not configured")
+        return await file_delivery.send(
+            ctx,
+            filename=args.filename,
+            content=args.content,
+            caption=args.caption,
+            operation_id=args.operation_id,
+        )
+
+    registry.add(
+        "file_send",
+        "Create a UTF-8 file in the user's folder and send it to Telegram as a downloadable "
+        "document. Use this whenever the user asks for a file, table, note or export. Do not "
+        "paste the full contents into the chat reply. Omit content to re-send an existing file.",
+        FileSend,
+        file_send,
+        idempotent_write=True,
+    )
+
+    async def file_list(_args: Empty, ctx: ToolContext) -> dict[str, Any]:
+        if file_delivery is None:
+            raise RuntimeError("file delivery is not configured")
+        return file_delivery.list_files(ctx.user_id)
+
+    registry.add(
+        "file_list",
+        "List files previously created for this user. Re-send one with file_send without content.",
+        Empty,
+        file_list,
+    )
+
+    async def file_read(args: FileName, ctx: ToolContext) -> dict[str, Any]:
+        if file_delivery is None:
+            raise RuntimeError("file delivery is not configured")
+        return file_delivery.read_file(ctx.user_id, args.filename)
+
+    registry.add(
+        "file_read",
+        "Read a UTF-8 file from the user's folder. Large files are truncated.",
+        FileName,
+        file_read,
+    )
+
     # ---- system ---------------------------------------------------------------
 
     async def system_status(_args: Empty, _ctx: ToolContext) -> dict[str, Any]:
@@ -736,6 +811,8 @@ def register_tools(
         return _disk_info()
 
     registry.add("system_disk", "Disk usage of the data volume.", Empty, system_disk)
+
+    register_training_tools(registry, repos, file_delivery=file_delivery)
 
     # ---- search ----------------------------------------------------------------
 

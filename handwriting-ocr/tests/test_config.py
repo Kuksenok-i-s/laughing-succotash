@@ -26,8 +26,15 @@ def test_from_env_reads_ocr_prefix() -> None:
 
 def test_defaults_idle_unload_is_ten_minutes() -> None:
     settings = from_env({"OCR_TOKEN": "t" * 40})
+    assert settings.host == "127.0.0.1"
     assert settings.keep_alive == "10m"
     assert settings.idle_unload_seconds == 600.0
+
+
+def test_a_blank_host_falls_back_to_loopback() -> None:
+    settings = from_env({"OCR_TOKEN": "t" * 40, "OCR_HOST": "", "OCR_PORT": ""})
+    assert settings.host == "127.0.0.1"
+    assert settings.port == 17494
 
 
 def test_missing_token_is_a_runtime_problem() -> None:

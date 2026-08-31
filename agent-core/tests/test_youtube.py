@@ -99,7 +99,7 @@ def test_downloaded_videos_are_renamed_to_the_readable_title(tmp_path: Path) -> 
         encoding="utf-8",
     )
     downloader = YoutubeDownloader(
-        remote="root@host", remote_dir="/root/ytdl", ssh_key=Path("~/.ssh/id")
+        remote="ytdl@host", remote_dir="/var/lib/telegram-gateway/youtube/work", ssh_key=Path("~/.ssh/id")
     )
     library = downloader._parse_video_dir(dest, "video")
     assert [path.name for path in library.files] == [
@@ -132,7 +132,7 @@ def test_playlist_videos_are_numbered_without_youtube_ids(tmp_path: Path) -> Non
             encoding="utf-8",
         )
     downloader = YoutubeDownloader(
-        remote="root@host", remote_dir="/root/ytdl", ssh_key=Path("~/.ssh/id")
+        remote="ytdl@host", remote_dir="/var/lib/telegram-gateway/youtube/work", ssh_key=Path("~/.ssh/id")
     )
     library = downloader._parse_video_dir(dest, "playlist")
     assert library.title == "Курс по сетям"
@@ -160,7 +160,7 @@ def test_transcript_markdown_includes_clocks_and_source() -> None:
 
 def test_downloader_refuses_tmp_on_the_proxy() -> None:
     try:
-        YoutubeDownloader(remote="root@host", remote_dir="/tmp/ytdl", ssh_key="~/.ssh/id")
+        YoutubeDownloader(remote="ytdl@host", remote_dir="/tmp/ytdl", ssh_key="~/.ssh/id")
     except YoutubeError as exc:
         assert "/tmp" in str(exc)
     else:
@@ -170,8 +170,8 @@ def test_downloader_refuses_tmp_on_the_proxy() -> None:
 def test_downloader_refuses_tmp_cookies() -> None:
     try:
         YoutubeDownloader(
-            remote="root@host",
-            remote_dir="/root/ytdl",
+            remote="ytdl@host",
+            remote_dir="/var/lib/telegram-gateway/youtube/work",
             ssh_key="~/.ssh/id",
             cookies="/tmp/cookies.txt",
         )
@@ -183,8 +183,8 @@ def test_downloader_refuses_tmp_cookies() -> None:
 
 def test_ytdlp_commands_pass_cookies_when_configured() -> None:
     downloader = YoutubeDownloader(
-        remote="root@host",
-        remote_dir="/root/ytdl",
+        remote="ytdl@host",
+        remote_dir="/var/lib/telegram-gateway/youtube/work",
         ssh_key=Path("~/.ssh/id"),
         cookies="/var/lib/telegram-gateway/youtube/cookies.txt",
     )
@@ -202,9 +202,67 @@ def test_ytdlp_commands_pass_cookies_when_configured() -> None:
     assert "--max-downloads" not in video
 
 
+def test_ssh_skips_system_config() -> None:
+    cmd = _downloader()._ssh()
+    assert cmd[:3] == ["ssh", "-F", "none"]
+    assert "IdentitiesOnly=yes" in cmd
+    assert "BatchMode=yes" in cmd
+    assert "StrictHostKeyChecking=yes" in cmd
+    assert not any("accept-new" in part for part in cmd)
+
+
+def test_ssh_pins_known_hosts_file(tmp_path: Path) -> None:
+    hosts = tmp_path / "known_hosts"
+    hosts.write_text("host ssh-ed25519 AAAA\n", encoding="utf-8")
+    cmd = YoutubeDownloader(
+        remote="ytdl@host",
+        remote_dir="/var/lib/telegram-gateway/youtube/work",
+        ssh_key=Path("~/.ssh/id"),
+        known_hosts=hosts,
+    )._ssh()
+    assert f"UserKnownHostsFile={hosts.resolve()}" in cmd
+
+
+def test_downloader_refuses_root_remote() -> None:
+    try:
+        YoutubeDownloader(
+            remote="root@host",
+            remote_dir="/var/lib/telegram-gateway/youtube/work",
+            ssh_key="~/.ssh/id",
+        )
+    except YoutubeError as exc:
+        assert "root" in str(exc).lower()
+    else:
+        raise AssertionError("expected YoutubeError")
+
+
+def test_from_settings_refuses_root_remote(tmp_path: Path) -> None:
+    from agent_core.config import Settings
+
+    key = tmp_path / "id"
+    key.write_text("x")
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[paths]\n"
+        f'ssh_key = "{key}"\n'
+        "[download]\n"
+        'remote = "root@host"\n'
+    )
+    settings = Settings(
+        instance_id="test-core",
+        gateway_url="ws://localhost/rpc",
+        core_token="x" * 40,
+        mcp_token="y" * 40,
+        allowed_users=["tg:1"],
+        data_dir=tmp_path / "data",
+        youtube_config=cfg,
+    )
+    assert YoutubeDownloader.from_settings(settings) is None
+
+
 def test_ytdlp_commands_omit_cookies_when_unset() -> None:
     downloader = YoutubeDownloader(
-        remote="root@host", remote_dir="/root/ytdl", ssh_key=Path("~/.ssh/id")
+        remote="ytdl@host", remote_dir="/var/lib/telegram-gateway/youtube/work", ssh_key=Path("~/.ssh/id")
     )
     url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
     assert "--cookies" not in downloader._audio_remote_cmd(url, "job1")
@@ -224,7 +282,7 @@ def test_from_settings_reads_cookies(tmp_path: Path) -> None:
         f'ssh_key = "{key}"\n'
         f'cookies = "{cookies}"\n'
         "[download]\n"
-        'remote = "root@host"\n'
+        'remote = "ytdl@host"\n'
         'cookies = "/var/lib/telegram-gateway/youtube/cookies.txt"\n'
     )
     settings = Settings(
@@ -240,11 +298,13 @@ def test_from_settings_reads_cookies(tmp_path: Path) -> None:
     assert downloader is not None
     assert downloader._cookies == "/var/lib/telegram-gateway/youtube/cookies.txt"
     assert downloader._local_cookies == cookies
+    assert downloader._remote_dir == "/var/lib/telegram-gateway/youtube/work"
+    assert downloader._ytdlp_version == "2026.08.19"
 
 
 def _downloader() -> YoutubeDownloader:
     return YoutubeDownloader(
-        remote="root@host", remote_dir="/root/ytdl", ssh_key=Path("~/.ssh/id")
+        remote="ytdl@host", remote_dir="/var/lib/telegram-gateway/youtube/work", ssh_key=Path("~/.ssh/id")
     )
 
 

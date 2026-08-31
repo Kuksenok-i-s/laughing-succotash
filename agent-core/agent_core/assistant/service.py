@@ -20,6 +20,7 @@ from pa_protocol import methods
 
 from ..agent.base import AgentContext, AgentError, AgentUnavailable, Provenance
 from ..audio.converter import probe_duration
+from ..files import FileDelivery, looks_like_file_request, suggested_filename
 from ..mcp.permissions import ToolContext
 from ..mcp.timeutil import format_local
 from ..stt.base import STT_CPU_FALLBACK, SttError, TranscriptionResult
@@ -64,6 +65,7 @@ class AssistantService:
         confirmations=None,
         journal=None,
         ocr=None,
+        file_delivery: FileDelivery | None = None,
     ) -> None:
         self._settings = settings
         self._repos = repos
@@ -78,6 +80,7 @@ class AssistantService:
         self._confirmations = confirmations
         self.journal = journal
         self._ocr = ocr
+        self._file_delivery = file_delivery
         self._album_locks: dict[str, asyncio.Lock] = {}
 
     # ---- intake ---------------------------------------------------------
@@ -330,6 +333,7 @@ class AssistantService:
             response = await self._converse(
                 job, text, provenance=Provenance.DIRECT_COMMAND, wrap=prompts.direct_turn
             )
+            response = await self._ensure_file_delivered(job, text, response)
         await self._reply(job, response)
 
     async def _converse(
@@ -354,6 +358,7 @@ class AssistantService:
             provenance=provenance,
             job_id=job.job_id,
             chat_id=job.chat_id,
+            message_id=job.message_id,
             timezone=agent_context.timezone,
             now=agent_context.now,
         )
@@ -435,6 +440,9 @@ class AssistantService:
                     transcription.text,
                     provenance=Provenance.DIRECT_COMMAND,
                     wrap=prompts.voice_turn,
+                )
+                response = await self._ensure_file_delivered(
+                    job, transcription.text, response
                 )
             await self._reply(job, response)
             return
@@ -968,19 +976,42 @@ class AssistantService:
         session_id = await self._backend.create_session(
             workspace=self._settings.user_workspace(job.user_id), mcp_servers=[]
         )
-        prompt = prompts.youtube_summary(
-            title,
-            notes,
-            agent_context,
+        source = dict(
+            title=title,
+            notes=notes,
+            context=agent_context,
             excerpt=None if notes else excerpt[:8000],
             duration_seconds=transcription.duration,
         )
+
+        async def on_progress(stage: str, detail: str | None) -> None:
+            await self._progress(job, stage, detail=detail or title)
+
+        factcheck = ""
         try:
-            response = await self._backend.send_message(session_id, prompt, agent_context)
+            await self._progress(job, "summarizing", detail=f"фактчек · {title}")
+            first = await self._backend.send_message(
+                session_id,
+                prompts.youtube_factcheck(**source),
+                agent_context,
+                on_progress=on_progress,
+            )
+            factcheck = (first.text or "").strip()[:12000]
+        except AgentError as exc:
+            log.warning("youtube factcheck prompt failed: %s", exc)
+
+        try:
+            await self._progress(job, "summarizing", detail=title)
+            response = await self._backend.send_message(
+                session_id,
+                prompts.youtube_summary(**source, factcheck=factcheck or None),
+                agent_context,
+                on_progress=on_progress,
+            )
         except AgentError as exc:
             log.warning("youtube summary prompt failed: %s", exc)
-            return notes or excerpt[:4000]
-        return (response.text or "").strip() or notes or excerpt[:4000]
+            return factcheck or notes or excerpt[:4000]
+        return (response.text or "").strip() or factcheck or notes or excerpt[:4000]
 
     async def _youtube_collection_summary(
         self,
@@ -1110,6 +1141,57 @@ class AssistantService:
         }
 
     # ---- outbound helpers ---------------------------------------------------------
+
+    async def _ensure_file_delivered(self, job: Job, user_text: str, response: str) -> str:
+        """If the user asked for a file and the model did not call file_send, send one anyway.
+
+        Chat sessions run in Cursor plan mode, which makes the model describe a file instead of
+        creating it. A second prompt usually gets ``file_send``; if not, the reply body goes out
+        as a Telegram document.
+        """
+        if not looks_like_file_request(user_text):
+            return response
+        if self._file_delivery is not None and self._file_delivery.sent_for(job.job_id):
+            return response
+
+        log.info("job %s asked for a file but none was sent; nudging the agent", job.job_id)
+        retry = await self._converse(
+            job, user_text, provenance=Provenance.DIRECT_COMMAND, wrap=prompts.file_send_retry_turn
+        )
+        if self._file_delivery is not None and self._file_delivery.sent_for(job.job_id):
+            return retry.strip() or "Файл отправил."
+
+        body = retry.strip() if len(retry.strip()) >= len((response or "").strip()) else response
+        if len((body or "").strip()) < 40:
+            return retry or response
+
+        filename = suggested_filename(user_text)
+        if self._file_delivery is not None:
+            conversation_id = job.payload.get("conversation_id") or ""
+            await self._file_delivery.send(
+                ToolContext(
+                    user_id=job.user_id,
+                    conversation_id=conversation_id,
+                    provenance=Provenance.DIRECT_COMMAND,
+                    job_id=job.job_id,
+                    chat_id=job.chat_id,
+                    message_id=job.message_id,
+                ),
+                filename=filename,
+                content=body,
+                caption=Path(filename).stem,
+                operation_id=f"{job.job_id}:fallback",
+            )
+        else:
+            await self._send_document(
+                job,
+                filename=filename,
+                content=body,
+                caption=Path(filename).stem,
+                delivery_suffix="doc:export",
+            )
+        log.info("job %s delivered fallback document %s", job.job_id, filename)
+        return "Отправил файлом ниже."
 
     async def _reply(self, job: Job, text: str) -> None:
         body = (text or "").strip()

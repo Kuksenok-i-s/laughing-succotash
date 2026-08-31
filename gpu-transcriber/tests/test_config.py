@@ -11,7 +11,7 @@ def test_defaults_need_only_a_token() -> None:
     settings = from_env({"GPU_STT_TOKEN": "t" * 40})
 
     assert settings.port == DEFAULT_PORT
-    assert settings.host == "0.0.0.0"
+    assert settings.host == "127.0.0.1"
     assert settings.device == "cuda"
     assert settings.idle_unload_seconds == 600.0
     assert settings.validate_runtime() == []
@@ -56,4 +56,4 @@ def test_a_blank_value_falls_back_to_the_default() -> None:
     settings = from_env({"GPU_STT_TOKEN": "t" * 40, "GPU_STT_PORT": "", "GPU_STT_HOST": ""})
 
     assert settings.port == DEFAULT_PORT
-    assert settings.host == ""
+    assert settings.host == "127.0.0.1"

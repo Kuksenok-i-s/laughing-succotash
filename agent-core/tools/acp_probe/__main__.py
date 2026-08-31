@@ -359,6 +359,168 @@ async def probe_plan_mode(tmp: Path) -> list[str]:
     return findings
 
 
+@probe("plan-mcp")
+async def probe_plan_mcp(tmp: Path) -> list[str]:
+    """Chat sessions run in plan mode; MCP tools must still be callable there.
+
+    If this fails, do not switch Telegram chat sessions to plan — Cursor would lose calendar /
+    reminder / task tools while still blocking shell. Fall back to cwd sandbox only.
+    """
+    findings: list[str] = []
+    calls: list[str] = []
+    canary = tmp / "plan_mcp_canary.txt"
+
+    class Handler(asyncio.Protocol):
+        def connection_made(self, transport):  # type: ignore[no-untyped-def]
+            self.transport = transport
+            self.buffer = b""
+
+        def data_received(self, data: bytes) -> None:
+            self.buffer += data
+            if b"\r\n\r\n" not in self.buffer:
+                return
+            header, _, rest = self.buffer.partition(b"\r\n\r\n")
+            length = 0
+            for line in header.split(b"\r\n"):
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":", 1)[1].strip())
+            body = rest
+            if len(body) < length:
+                return
+            body = body[:length]
+            self.buffer = b""
+            try:
+                message = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                self._reply(400, b'{"error":"bad json"}')
+                return
+            method = message.get("method")
+            message_id = message.get("id")
+            if method == "initialize":
+                result = {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {"name": "acp-probe-mcp", "version": "1.0.0"},
+                }
+                self._json(message_id, result)
+            elif method in ("notifications/initialized", "notifications/cancelled"):
+                self.transport.write(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+            elif method == "tools/list":
+                self._json(
+                    message_id,
+                    {
+                        "tools": [
+                            {
+                                "name": "probe_ping",
+                                "description": "Return the magic word. No arguments.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "additionalProperties": False,
+                                },
+                            }
+                        ]
+                    },
+                )
+            elif method == "tools/call":
+                name = (message.get("params") or {}).get("name", "")
+                calls.append(name)
+                self._json(
+                    message_id,
+                    {
+                        "content": [{"type": "text", "text": "pong-plan"}],
+                        "isError": False,
+                    },
+                )
+            else:
+                self._json(
+                    message_id,
+                    None,
+                    error={"code": -32601, "message": f"unknown: {method}"},
+                )
+
+        def _json(self, message_id, result, error=None):  # type: ignore[no-untyped-def]
+            payload: dict[str, Any] = {"jsonrpc": "2.0", "id": message_id}
+            if error is not None:
+                payload["error"] = error
+            else:
+                payload["result"] = result
+            raw = json.dumps(payload).encode()
+            self._reply(200, raw, content_type="application/json")
+
+        def _reply(self, status: int, body: bytes, content_type: str = "text/plain") -> None:
+            reason = {200: "OK", 400: "Bad Request"}.get(status, "OK")
+            headers = (
+                f"HTTP/1.1 {status} {reason}\r\n"
+                f"Content-Type: {content_type}\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                f"Mcp-Session-Id: probe\r\n"
+                f"\r\n"
+            ).encode()
+            self.transport.write(headers + body)
+
+    server = await asyncio.get_running_loop().create_server(Handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    url = f"http://127.0.0.1:{port}/mcp"
+    mcp = {
+        "name": "probe",
+        "type": "http",
+        "url": url,
+        "headers": [],
+    }
+
+    try:
+        async with acp(tmp) as client:
+            client.permission_answer = "allow_once"
+            session = (
+                await client.call(
+                    "session/new", {"cwd": str(tmp), "mcpServers": [mcp]}, timeout=60
+                )
+            )["sessionId"]
+            await client.call("session/set_mode", {"sessionId": session, "modeId": "plan"})
+            await client.call(
+                "session/prompt",
+                {
+                    "sessionId": session,
+                    "prompt": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Вызови MCP-инструмент probe_ping (без аргументов) и в ответе "
+                                "напиши ровно то, что он вернул. Не создавай файлы и не запускай "
+                                f"shell. Не пиши в {canary}."
+                            ),
+                        }
+                    ],
+                },
+                timeout=180,
+            )
+
+            execute_kinds = [
+                u
+                for u in client.kinds("tool_call")
+                if u.get("kind") == "execute"
+            ]
+            if execute_kinds:
+                findings.append(
+                    "plan mode still emitted execute tool_call; chat set_mode(plan) would not "
+                    "block shell — keep cwd sandbox only"
+                )
+            if canary.exists():
+                findings.append("plan+MCP probe wrote a canary file; plan mode is not read-only")
+            if "probe_ping" not in calls:
+                findings.append(
+                    "MCP tools/call never reached the probe server in plan mode; do not switch "
+                    "Telegram chat sessions to plan (assistant MCP would break). "
+                    f"permission_requests={len(client.permission_requests)} "
+                    f"reply={client.text().strip()[:120]!r}"
+                )
+    finally:
+        server.close()
+        await server.wait_closed()
+    return findings
+
+
 @probe("permissions")
 async def probe_permissions(tmp: Path) -> list[str]:
     """The asymmetry the whole security design rests on.

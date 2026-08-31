@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 from pa_protocol import methods, new_ulid
 
-from agent_core.agent.base import Provenance
+from agent_core.agent.base import AgentError, Provenance
 from agent_core.assistant.service import AssistantService
 from agent_core.assistant.sessions import SessionManager
 from agent_core.assistant.transcript import TranscriptAnalyzer
+from agent_core.files import FileDelivery
 from agent_core.jobs.manager import JobManager
 from agent_core.mcp.server import ContextRegistry
 from agent_core.stt.base import TranscriptionResult, TranscriptSegment
@@ -155,6 +156,7 @@ def build(settings, repos, gateway, backend, contexts, tmp_path):
             confirmations=confirmations,
             journal=journal,
             ocr=ocr,
+            file_delivery=FileDelivery(gateway, settings.user_workspace),
         )
         return service, jobs
 
@@ -208,6 +210,24 @@ async def test_the_first_turn_carries_the_operating_instructions(build, backend)
     assert "персональный ассистент" not in second_prompt.lower()
     assert "Сейчас:" in second_prompt
     assert backend.sessions == ["session-1"]
+
+
+async def test_a_markdown_file_request_is_delivered_as_a_document(
+    build, gateway, backend
+) -> None:
+    """Plan mode often answers with text instead of file_send; the Core still ships a file."""
+    backend.reply = "# Планы\n\n- тренировка в 19:00\n- доделать ADR к понедельнику"
+
+    service, jobs = build()
+    await service.submit(submit_params("сделай отчет в маркдаун о планах"))
+    assert await jobs.wait_idle()
+
+    assert any("file_send" in prompt for _, prompt in backend.prompts)
+    docs = gateway.documents()
+    assert len(docs) == 1
+    assert docs[0]["filename"] == "отчёт.md"
+    assert "тренировка" in docs[0]["content"]
+    assert gateway.texts() == ["Отправил файлом ниже."]
 
 
 def _foreign_source(**overrides) -> methods.MessageSource:
@@ -875,6 +895,82 @@ async def test_a_youtube_url_sends_two_named_documents(build, gateway, backend, 
     saved = list((tmp_path / "transcripts").rglob("*.md"))
     assert len(saved) == 2
     assert any("Сохранил:" in text for text in texts)
+
+
+async def test_a_youtube_summary_factchecks_then_writes_the_document(
+    build, gateway, backend, tmp_path
+) -> None:
+    youtube = FakeYoutube(title="Касперская: кибербезопасность", tmp_path=tmp_path)
+    stt = FakeStt(text="лекция про кибербезопасность и угрозы")
+    notes = (
+        "ПРОВЕРЯТЬ: да\n"
+        "1. «Угрозы растут»\n"
+        "   статус: подтверждено\n"
+        "   источники:\n"
+        "   - ENISA Threat Landscape — https://www.enisa.europa.eu/topics/cyber-threats\n"
+    )
+    document = (
+        "# Касперская: кибербезопасность\n\n"
+        "## Кратко\nКраткий обзор угроз.\n\n"
+        "## Основные тезисы\n1. Угрозы растут.\n\n"
+        "## Фактчек\n"
+        "- **Подтверждено.** «Угрозы растут» — "
+        "[ENISA Threat Landscape](https://www.enisa.europa.eu/topics/cyber-threats)\n"
+    )
+    replies = [notes, document]
+
+    def respond(message, _context):
+        assert replies, message
+        return replies.pop(0)
+
+    backend.on_prompt = respond
+    service, jobs = build(stt=stt, youtube=youtube)
+    await service.submit(submit_params("конспект https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+
+    prompts_sent = [text for _session, text in backend.prompts]
+    assert len(prompts_sent) == 2
+    assert backend.prompts[0][0] == backend.prompts[1][0]
+    assert "Это первый ход" in prompts_sent[0]
+    assert "Это второй ход" in prompts_sent[1]
+    assert "<factcheck>" in prompts_sent[1]
+    assert "https://www.enisa.europa.eu/topics/cyber-threats" in prompts_sent[1]
+
+    documents = [
+        params
+        for method, params in gateway.delivered
+        if method == "telegram.send_document"
+    ]
+    assert "Фактчек" in documents[0]["content"]
+    assert "https://www.enisa.europa.eu/topics/cyber-threats" in documents[0]["content"]
+    assert replies == []
+
+
+async def test_a_youtube_summary_still_writes_if_factcheck_fails(
+    build, gateway, backend, tmp_path
+) -> None:
+    youtube = FakeYoutube(title="Me at the zoo", tmp_path=tmp_path)
+    stt = FakeStt(text="hello zoo")
+
+    def respond(message, _context):
+        if "Это первый ход" in message:
+            raise AgentError("search unavailable")
+        return "# Me at the zoo\n\n## Кратко\nКороткий ролик.\n"
+
+    backend.on_prompt = respond
+    service, jobs = build(stt=stt, youtube=youtube)
+    await service.submit(submit_params("конспект https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+
+    prompts_sent = [text for _session, text in backend.prompts]
+    assert len(prompts_sent) == 2
+    assert "Фактчека нет" in prompts_sent[1]
+    documents = [
+        params
+        for method, params in gateway.delivered
+        if method == "telegram.send_document"
+    ]
+    assert "Короткий ролик" in documents[0]["content"]
 
 
 async def test_a_cpu_fallback_is_visible_while_waiting_and_afterwards(

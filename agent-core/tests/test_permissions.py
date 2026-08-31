@@ -21,7 +21,9 @@ TRANSCRIPT = ctx(Provenance.UNTRUSTED_CONTENT)
     "tool",
     ["calendar_list", "task_list", "note_search", "memory_search", "journal_search",
      "contact_search",
-     "system_status", "web_search", "calendar_find_free_slots"],
+     "system_status", "web_search", "calendar_find_free_slots", "file_list", "file_read",
+     "training_athlete_list", "training_log_list", "training_schedule_list",
+     "training_profile_get", "training_progress"],
 )
 def test_read_tools_run_without_asking(tool: str) -> None:
     assert decide(tool, DIRECT) is Decision.ALLOW
@@ -31,7 +33,8 @@ def test_read_tools_run_without_asking(tool: str) -> None:
 
 @pytest.mark.parametrize(
     "tool", ["reminder_create", "task_create", "note_create", "calendar_create",
-             "contact_create"]
+             "contact_create", "file_send", "training_log_save", "training_athlete_upsert",
+             "training_export", "training_profile_set"]
 )
 def test_safe_writes_depend_on_who_asked(tool: str) -> None:
     assert decide(tool, DIRECT) is Decision.ALLOW
@@ -40,7 +43,8 @@ def test_safe_writes_depend_on_who_asked(tool: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "tool", ["calendar_delete", "task_delete", "note_delete", "memory_forget"]
+    "tool", ["calendar_delete", "task_delete", "note_delete", "memory_forget",
+             "training_athlete_archive"]
 )
 def test_dangerous_tools_always_confirm(tool: str) -> None:
     assert decide(tool, DIRECT) is Decision.CONFIRM
@@ -74,6 +78,18 @@ def test_confirmation_prompt_shows_the_actual_arguments() -> None:
     assert "24.08 16:00" in text
     assert "Саша Иванов" in permissions.describe_action(
         "contact_create", {"display_name": "Саша Иванов"}
+    )
+    assert "план.csv" in permissions.describe_action(
+        "file_send", {"filename": "план.csv"}
+    )
+    assert "Вася" in permissions.describe_action(
+        "training_athlete_upsert", {"display_name": "Вася"}
+    )
+    assert "тренера" in permissions.describe_action(
+        "training_profile_set", {"mode": "trainer"}
+    )
+    assert "2026-08-30" in permissions.describe_action(
+        "training_log_save", {"local_date": "2026-08-30", "athlete_name": "Вася"}
     )
 
 

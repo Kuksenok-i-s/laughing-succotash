@@ -20,6 +20,7 @@ from .assistant.transcript import TranscriptAnalyzer
 from .audio.storage import UploadManager
 from .calendar.local import LocalCalendarProvider
 from .config import Settings, get_settings
+from .files import FileDelivery
 from .journal import JournalService
 from .jobs.manager import JobManager
 from .logging_setup import configure_logging
@@ -47,7 +48,9 @@ CAPABILITIES = [
     "journal",
     "contacts",
     "timers",
+    "files",
     "youtube",
+    "training",
 ]
 
 
@@ -122,6 +125,8 @@ class Core:
             user_workspace=self._settings.user_workspace,
         )
 
+        file_delivery = FileDelivery(link, self._settings.user_workspace)
+
         assistant = AssistantService(
             self._settings,
             repos,
@@ -140,6 +145,7 @@ class Core:
             confirmations=self._confirmations,
             journal=None,
             ocr=self._ocr,
+            file_delivery=file_delivery,
         )
 
         self._scheduler = Scheduler(
@@ -186,6 +192,7 @@ class Core:
             # the assistant has no network reach through MCP at all. See agent_core/search/base.py
             # for the contract an implementation has to satisfy.
             search_provider=None,
+            file_delivery=file_delivery,
         )
         log.info("mcp tools registered: %s", ", ".join(registry.names()))
 
