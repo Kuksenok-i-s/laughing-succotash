@@ -113,7 +113,9 @@ class Settings(BaseSettings):
     stt_beam_size: int = 5
     stt_vad_filter: bool = True
     max_audio_size_mb: int = 500
-    max_audio_duration_seconds: int = 14400
+    max_audio_duration_seconds: int = 36000
+    # Warn and keep going in the background once a recording is this long. 0 disables.
+    long_audio_warn_seconds: int = 3600
     upload_idle_timeout: float = 300.0
 
     # --- Handwriting OCR (remote only; no local model) ---

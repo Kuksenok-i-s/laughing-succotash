@@ -82,6 +82,7 @@ class AssistantService:
         self._ocr = ocr
         self._file_delivery = file_delivery
         self._album_locks: dict[str, asyncio.Lock] = {}
+        self._long_audio_notices: set[str] = set()
 
     # ---- intake ---------------------------------------------------------
 
@@ -781,6 +782,7 @@ class AssistantService:
             raise SttError(
                 f"recording is {int(duration // 60)} minutes, over the configured limit"
             )
+        await self._warn_long_audio(job, duration)
 
         run = _SttRun(partial(self._progress, job), detail=label)
         await run.announce()
@@ -860,6 +862,9 @@ class AssistantService:
         skipped = 0
         used_cpu = False
         total = len(batch.items)
+        await self._warn_long_audio(
+            job, sum((item.duration or 0) for item in batch.items) or None
+        )
         for position, media in enumerate(batch.items, start=1):
             label = f"{position}/{total} · {telegram_title(readable_title(media.title))}"
             try:
@@ -955,6 +960,38 @@ class AssistantService:
         for suffix, content in files:
             save_library_text(folder, readable_filename(title, suffix), content)
         return str(folder)
+
+    async def _warn_long_audio(self, job: Job, duration: float | None) -> None:
+        """Tell the user a long transcription is running in the background; at most once per job.
+
+        YouTube already uses its own job lane, so chat stays usable. The warning is a real
+        message (not a status edit) because a four-hour run would otherwise look stuck.
+        """
+        warn_after = self._settings.long_audio_warn_seconds
+        if not duration or not warn_after or duration < warn_after:
+            return
+        if job.job_id in self._long_audio_notices:
+            return
+        self._long_audio_notices.add(job.job_id)
+        length = format_duration(duration) or f"{int(duration // 60)} мин"
+        await self._link.send_event(
+            methods.TELEGRAM_SEND,
+            methods.dump(
+                methods.TelegramSendParams(
+                    delivery_id=f"{job.job_id}:long-audio",
+                    user_id=job.user_id,
+                    chat_id=job.chat_id or 0,
+                    text=(
+                        f"Запись *{length}* — расшифровка займёт время, сделаю в фоне. "
+                        "Можно писать дальше, пришлю результат отдельно."
+                    ),
+                    reply_to_message_id=job.message_id,
+                    kind="notification",
+                )
+            ),
+            delivery_id=f"{job.job_id}:long-audio",
+            user_id=job.user_id,
+        )
 
     async def _youtube_summary(
         self, job: Job, title: str, transcription: TranscriptionResult

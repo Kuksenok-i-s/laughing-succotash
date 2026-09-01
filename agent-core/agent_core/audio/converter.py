@@ -1,8 +1,8 @@
 """ffmpeg/ffprobe helpers.
 
 faster-whisper decodes most containers itself, so audio is normally handed to it untouched. What
-we do need before starting an expensive transcription is the duration, so a four-hour file can be
-rejected in a second rather than after an hour of CPU time.
+we do need before starting an expensive transcription is the duration, so a file over the
+configured limit can be rejected in a second rather than after an hour of CPU time.
 """
 
 from __future__ import annotations

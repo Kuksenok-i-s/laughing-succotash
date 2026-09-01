@@ -811,8 +811,15 @@ class FakeConfirmations:
 
 
 class FakeYoutube:
-    def __init__(self, title: str = "Me at the zoo", tmp_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        title: str = "Me at the zoo",
+        tmp_path: Path | None = None,
+        *,
+        duration: float = 19.0,
+    ) -> None:
         self.title = title
+        self.duration = duration
         self.calls: list[str] = []
         self.video_calls: list[tuple[str, str]] = []
         root = tmp_path or Path("/tmp/yt-test")
@@ -839,7 +846,7 @@ class FakeYoutube:
                     url=url,
                     video_id=f"id{index}",
                     title=title,
-                    duration=19.0,
+                    duration=self.duration,
                     audio_path=audio,
                     index=index + 1,
                 )
@@ -1101,6 +1108,61 @@ async def test_a_bare_video_url_asks_which_mode(build, gateway, tmp_path) -> Non
     assert youtube.calls == []
     assert youtube.video_calls == [("https://www.youtube.com/watch?v=jNQXAC9IVRw", "video")]
     assert any("Сохранил на диск" in text for text in gateway.texts())
+
+
+async def test_a_long_youtube_video_warns_then_still_writes_the_conspect(
+    build, gateway, tmp_path
+) -> None:
+    youtube = FakeYoutube(title="Почему мы закрылись", tmp_path=tmp_path, duration=4 * 3600 + 60)
+    stt = FakeStt(text="прощальный стрим", duration=4 * 3600 + 60)
+    service, jobs = build(stt=stt, youtube=youtube)
+
+    accepted = await service.submit(submit_params("конспект https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+
+    texts = gateway.texts()
+    warnings = [text for text in texts if "в фоне" in text]
+    assert len(warnings) == 1
+    assert "4 ч 1 мин" in warnings[0]
+    assert any("Конспект и полный транскрипт" in text for text in texts)
+    assert [doc["filename"] for doc in gateway.documents()] == [
+        "Почему мы закрылись — конспект.md",
+        "Почему мы закрылись — транскрипт.md",
+    ]
+    long_audio = [
+        params
+        for method, params in gateway.delivered
+        if method == methods.TELEGRAM_SEND and params.get("delivery_id", "").endswith(":long-audio")
+    ]
+    assert len(long_audio) == 1
+    job = await service._repos.jobs.get(accepted.job_id)  # noqa: SLF001
+    assert job.status == "completed"
+
+
+async def test_a_short_youtube_video_does_not_warn_about_the_background(
+    build, gateway, tmp_path
+) -> None:
+    youtube = FakeYoutube(title="Me at the zoo", tmp_path=tmp_path, duration=19.0)
+    service, jobs = build(stt=FakeStt(text="hello zoo"), youtube=youtube)
+    await service.submit(submit_params("конспект https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+    assert not any("в фоне" in text for text in gateway.texts())
+
+
+async def test_a_youtube_video_over_ten_hours_is_still_refused(build, gateway, tmp_path) -> None:
+    youtube = FakeYoutube(title="Too long", tmp_path=tmp_path, duration=10 * 3600 + 60)
+    service, jobs = build(stt=FakeStt(text="should not run"), youtube=youtube)
+    accepted = await service.submit(submit_params("конспект https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+
+    job = await service._repos.jobs.get(accepted.job_id)  # noqa: SLF001
+    assert job.status == "failed"
+    assert job.error_code == "stt_failed"
+    failures = [p for m, p in gateway.delivered if m == methods.JOB_FAILED]
+    assert "over the configured limit" in failures[0]["error"]["message"]
+    assert youtube.calls
+    assert not gateway.documents()
+    assert not any("в фоне" in text for text in gateway.texts())
 
 
 async def test_a_plain_question_is_not_treated_as_youtube(build, gateway, backend, tmp_path) -> None:
