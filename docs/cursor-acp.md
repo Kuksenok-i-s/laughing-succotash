@@ -86,6 +86,9 @@ Consequences for this project:
 - `models` — `currentModelId` (`default[]` = Auto) and ~35 available model IDs.
 - `configOptions` — the same mode/model choices in generic form.
 
+`session/set_model` is rejected with `-32602 Invalid params` on the installed CLI. Pin the model
+on the process instead: `cursor-agent --model <id> acp` (`CURSOR_MODEL` in Core `.env`).
+
 ## `session/prompt`
 
 ```json
@@ -237,6 +240,26 @@ process as the Core's SQLite repositories, scheduler and confirmation service. A
 would be a separate process needing its own IPC channel back to the Core just to ask the user a
 confirmation question.
 
+## Cursor extension methods — blocking, and they hang the turn if unanswered
+
+Telegram chat sessions run in `plan` mode. In that mode Cursor will, on some turns, send a
+**blocking** JSON-RPC request to the client:
+
+| Method | Type | What we do |
+| --- | --- | --- |
+| `cursor/create_plan` | request (blocks `session/prompt`) | Auto-accept `{"outcome":{"outcome":"accepted"}}`. The plan markdown is kept as the reply if no `agent_message_chunk` follows. We do **not** switch to `agent` mode. |
+| `cursor/ask_question` | request (blocks `session/prompt`) | Skip (`outcome: skipped`). There is no Telegram UI for ACP multiple-choice. |
+| `cursor/update_todos`, `cursor/task`, `cursor/generate_image` | notifications | Ignored |
+
+Replying with an empty `{}` success — or not replying at all — leaves `session/prompt` waiting
+until the client timeout. Cursor's own fallback for an unimplemented `cursor/create_plan` does
+not cover every error path; a valid nested `outcome` is required. Unknown methods get JSON-RPC
+`-32601`, not a fake success.
+
+A separate, also intermittent, failure: `agent_message_chunk` can arrive **after** the
+`session/prompt` result (`stopReason: end_turn`). The reply text is not in that result. The
+client must keep accumulating chunks for a short idle window before treating the turn as empty.
+
 ## Errors
 
 Standard JSON-RPC codes. Unknown method:
@@ -264,6 +287,8 @@ but it does identify the offending field path.
 | Workspaces | per-session `cwd` | project allowlist |
 | MCP over stdio | works | not used |
 | MCP over HTTP | works (`type` + `headers` required) | `mcp/server.py` |
+| `cursor/create_plan` | must be answered or the turn hangs | `agent/acp_client.py` |
+| Streaming after `end_turn` | chunks can lag the RPC result | drain in `agent/cursor_acp.py` |
 | Audio prompt input | **unsupported** | forces local Whisper |
 | Embedded context resources | **unsupported** | forces in-band transcripts |
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,12 @@ _KIND_TO_STAGE = {
     "other": "executing_tool",
 }
 
+# ACP agents (Cursor included) have been observed to emit agent_message_chunk AFTER the
+# session/prompt RPC result with stopReason=end_turn. Popping the turn immediately loses the
+# actual reply. Drain until stdout goes idle, bounded so a silent agent cannot stall us.
+_TRAILING_IDLE = 0.3
+_TRAILING_MAX = 2.0
+
 
 class _Turn:
     """Accumulates the streamed updates for one ``session/prompt``."""
@@ -38,10 +45,16 @@ class _Turn:
         self.on_progress = on_progress
         # Replayed history from session/load must not be mistaken for this turn's reply.
         self.accepting = True
+        self.last_activity = time.monotonic()
+        # cursor/create_plan body, used if the turn ends without agent_message_chunk.
+        self.plan_text = ""
 
     @property
     def text(self) -> str:
         return "".join(self.chunks).strip()
+
+    def note(self) -> None:
+        self.last_activity = time.monotonic()
 
 
 class CursorACPBackend:
@@ -96,9 +109,11 @@ class CursorACPBackend:
                 self._binary,
                 cwd=self._default_workspace,
                 request_timeout=self._prompt_timeout,
+                model=self._model,
             )
             client.on_update = self._on_update
             client.on_permission = self._on_permission
+            client.on_create_plan = self._on_create_plan
             try:
                 await client.start()
                 await asyncio.wait_for(client.initialize(), self._startup_timeout)
@@ -157,23 +172,9 @@ class CursorACPBackend:
             raise AgentError("cursor session/new returned no sessionId")
         self._live_sessions.add(session_id)
         client.bind_session_root(session_id, workspace)
-
-        if self._model:
-            await self._select_model(session_id)
+        # Model is pinned on the process (``cursor-agent --model … acp``). session/set_model is
+        # rejected on current CLI builds and would only log a false "using Auto".
         return session_id
-
-    async def _select_model(self, session_id: str) -> None:
-        """Best-effort model pin.
-
-        A configured model that this account cannot use should degrade to Auto rather than break
-        the assistant entirely.
-        """
-        try:
-            await self._require().call(
-                "session/set_model", {"sessionId": session_id, "modelId": self._model}, timeout=30
-            )
-        except AcpProcessError as exc:
-            log.warning("could not select model %s: %s; using Auto", self._model, exc)
 
     async def resume_session(
         self,
@@ -248,6 +249,9 @@ class CursorACPBackend:
                 {"sessionId": session_id, "prompt": [{"type": "text", "text": message}]},
                 timeout=self._prompt_timeout,
             )
+            stop_reason = result.get("stopReason", "end_turn")
+            if stop_reason != "cancelled":
+                await self._drain_trailing(turn)
         except AcpProcessError as exc:
             self._state = "degraded" if client.running else "unavailable"
             raise AgentError(f"cursor prompt failed: {exc}", retryable=not client.running) from exc
@@ -259,12 +263,32 @@ class CursorACPBackend:
             self._turns.pop(session_id, None)
             self._permission_context.pop(session_id, None)
 
+        text = turn.text or _text_from_prompt_result(result) or turn.plan_text
+        if not text and stop_reason != "cancelled":
+            log.warning(
+                "cursor prompt produced no user-visible text (stop=%s tools=%d session=%s)",
+                stop_reason,
+                len(turn.tool_calls),
+                session_id,
+            )
         return AgentResponse(
-            text=turn.text,
-            stop_reason=result.get("stopReason", "end_turn"),
+            text=text,
+            stop_reason=stop_reason,
             tool_calls=list(turn.tool_calls.values()),
             session_id=session_id,
         )
+
+    async def _drain_trailing(self, turn: _Turn) -> None:
+        """Wait out late session/update frames that overtake the prompt RPC result."""
+        # Activity from *before* the RPC result must not skip the grace window: the whole
+        # reply can arrive 5–50ms after end_turn with last_activity already seconds old.
+        turn.last_activity = time.monotonic()
+        deadline = time.monotonic() + _TRAILING_MAX
+        while time.monotonic() < deadline:
+            idle = time.monotonic() - turn.last_activity
+            if idle >= _TRAILING_IDLE:
+                return
+            await asyncio.sleep(min(0.05, _TRAILING_IDLE - idle))
 
     async def cancel(self, session_id: str) -> None:
         client = self._client
@@ -283,9 +307,10 @@ class CursorACPBackend:
             return
 
         kind = update.get("sessionUpdate")
+        turn.note()
 
         if kind == "agent_message_chunk":
-            text = (update.get("content") or {}).get("text")
+            text = _chunk_text(update)
             if text:
                 turn.chunks.append(text)
             return
@@ -312,7 +337,9 @@ class CursorACPBackend:
                 )
             if turn.on_progress is not None:
                 stage = _KIND_TO_STAGE.get(call.kind, "executing_tool")
-                await turn.on_progress(stage, call.title or None)
+                # Do not await on the stdout reader: a slow gateway notify would stall ACP
+                # frames, including the session/prompt result and late message chunks.
+                asyncio.ensure_future(turn.on_progress(stage, call.title or None))
             return
 
         if kind == "tool_call_update":
@@ -345,6 +372,52 @@ class CursorACPBackend:
         log.debug("auto-allowing tool call: %s", title)
         return allow
 
+    async def _on_create_plan(self, params: dict[str, Any]) -> None:
+        turn = self._turn_for(params)
+        name = (params.get("name") or "").strip()
+        overview = (params.get("overview") or "").strip()
+        plan = (params.get("plan") or "").strip()
+        body = plan or overview
+        if turn is not None and body:
+            turn.plan_text = body
+            turn.note()
+            if turn.on_progress is not None:
+                asyncio.ensure_future(turn.on_progress("agent", name or "план"))
+        log.info("auto-accepted cursor/create_plan (%s)", name or "untitled")
+
+    def _turn_for(self, params: dict[str, Any]) -> _Turn | None:
+        session_id = params.get("sessionId") or ""
+        if session_id:
+            return self._turns.get(session_id)
+        if len(self._turns) == 1:
+            return next(iter(self._turns.values()))
+        return None
+
     async def _ensure_started(self) -> None:
         if self._client is None or not self._client.running:
             await self.start()
+
+
+def _chunk_text(update: dict[str, Any]) -> str:
+    content = update.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return content.get("text") or ""
+    if isinstance(content, list):
+        parts = [
+            block.get("text") or ""
+            for block in content
+            if isinstance(block, dict)
+        ]
+        return "".join(parts)
+    return ""
+
+
+def _text_from_prompt_result(result: dict[str, Any] | None) -> str:
+    if not result:
+        return ""
+    text = result.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return _chunk_text(result).strip()

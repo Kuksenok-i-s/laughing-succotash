@@ -27,10 +27,24 @@ _STDOUT_LIMIT = 32 * 1024 * 1024
 
 UpdateHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 PermissionHandler = Callable[[dict[str, Any]], Awaitable[str | None]]
+CreatePlanHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class AcpProcessError(RuntimeError):
     pass
+
+
+def acp_argv(binary: str, model: str | None = None) -> list[str]:
+    """``cursor-agent --model <id> acp`` — ``--model`` is a root flag, not an acp option.
+
+    ``session/set_model`` is rejected with ``-32602 Invalid params`` on current CLI builds, so the
+    process-level flag is the only pin that actually sticks.
+    """
+    argv = [binary]
+    if model:
+        argv.extend(["--model", model])
+    argv.append("acp")
+    return argv
 
 
 class AcpClient:
@@ -43,11 +57,13 @@ class AcpClient:
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         request_timeout: float = 1800.0,
+        model: str | None = None,
     ) -> None:
         self._binary = binary
         self._cwd = cwd
         self._env = env
         self._request_timeout = request_timeout
+        self._model = model
 
         self._process: asyncio.subprocess.Process | None = None
         self._pending: dict[str, asyncio.Future[Any]] = {}
@@ -64,6 +80,9 @@ class AcpClient:
 
         self.on_update: UpdateHandler | None = None
         self.on_permission: PermissionHandler | None = None
+        # Chat sessions run in plan mode; Cursor blocks the turn on cursor/create_plan until we
+        # answer. Ignoring it (or replying `{}`) hangs session/prompt until the client timeout.
+        self.on_create_plan: CreatePlanHandler | None = None
 
     @property
     def running(self) -> bool:
@@ -83,10 +102,12 @@ class AcpClient:
         if self._env:
             env.update(self._env)
 
+        argv = acp_argv(self._binary, self._model)
+        if self._model:
+            log.info("starting acp pinned to %s", self._model)
         try:
             self._process = await asyncio.create_subprocess_exec(
-                self._binary,
-                "acp",
+                *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -260,16 +281,24 @@ class AcpClient:
         if method is None:
             return
 
+        if method == "session/update":
+            await self._handle_update(message.get("params") or {})
+            if "id" in message:
+                # Some ACP agents ack updates as requests. Answer so they do not stall, but the
+                # chunks must still be accumulated — that is the actual reply text.
+                asyncio.ensure_future(self._write({"jsonrpc": "2.0", "id": message["id"], "result": {}}))
+            return
+
         if "id" in message:
             asyncio.ensure_future(self._handle_server_request(message))
-        elif method == "session/update":
-            await self._handle_update(message.get("params") or {})
 
     async def _handle_update(self, params: dict[str, Any]) -> None:
         if self.on_update is None:
             return
         session_id = params.get("sessionId", "")
         update = params.get("update") or {}
+        if not update and params.get("sessionUpdate"):
+            update = {key: value for key, value in params.items() if key != "sessionId"}
         try:
             await self.on_update(session_id, update)
         except Exception:
@@ -283,7 +312,8 @@ class AcpClient:
         """
         method = message["method"]
         params = message.get("params") or {}
-        result: dict[str, Any] = {}
+        result: dict[str, Any] | None = None
+        error: dict[str, Any] | None = None
 
         try:
             if method == "session/request_permission":
@@ -292,16 +322,46 @@ class AcpClient:
                 result = self._read_file(params)
             elif method == "fs/write_text_file":
                 result = self._write_file(params)
+            elif method == "cursor/create_plan":
+                result = await self._answer_create_plan(params)
+            elif method == "cursor/ask_question":
+                result = _answer_ask_question(params)
             else:
-                log.debug("unhandled acp client request: %s", method)
+                log.warning("unhandled acp client request: %s", method)
+                error = {"code": -32601, "message": f"Method not found: {method}"}
         except Exception:
             log.exception("failed to answer acp request %s", method)
-            result = {}
+            # An empty `{}` success on a blocking Cursor extension hangs session/prompt until the
+            # client timeout (observed: no end_turn after create_plan). Unblock with a real outcome.
+            if method in {
+                "session/request_permission",
+                "cursor/create_plan",
+                "cursor/ask_question",
+            }:
+                result = {"outcome": {"outcome": "cancelled"}}
+            else:
+                error = {"code": -32603, "message": f"Internal error: {method}"}
 
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": message["id"]}
+        if error is not None:
+            payload["error"] = error
+        else:
+            payload["result"] = result if result is not None else {}
         try:
-            await self._write({"jsonrpc": "2.0", "id": message["id"], "result": result})
+            await self._write(payload)
         except Exception:
             log.debug("could not reply to acp request", exc_info=True)
+
+    async def _answer_create_plan(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Unblock plan-mode turns. Telegram chat sessions always run in plan.
+
+        Cursor waits for this reply. Auto-accept: the plan is just markdown, and switching to
+        agent mode would lift the built-in write/shell block. The plan body is forwarded to the
+        turn so the user still sees it if no ``agent_message_chunk`` follows.
+        """
+        if self.on_create_plan is not None:
+            await self.on_create_plan(params)
+        return {"outcome": {"outcome": "accepted"}}
 
     async def _answer_permission(self, params: dict[str, Any]) -> dict[str, Any]:
         options = params.get("options") or []
@@ -367,3 +427,14 @@ def _option_of_kind(options: list[dict[str, Any]], kind: str) -> str | None:
         if option.get("kind") == kind:
             return option.get("optionId")
     return None
+
+
+def _answer_ask_question(params: dict[str, Any]) -> dict[str, Any]:
+    """Unblock ``cursor/ask_question`` without a Telegram UI for the choices.
+
+    Skip rather than pick the first option: a silent first-option answer could confirm a
+    destructive choice the user never saw.
+    """
+    title = (params.get("title") or "").strip()
+    log.info("skipping cursor/ask_question (%s)", title or "untitled")
+    return {"outcome": {"outcome": "skipped", "reason": "no interactive UI on telegram"}}
