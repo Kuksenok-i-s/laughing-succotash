@@ -8,19 +8,27 @@ def test_from_env_reads_ocr_prefix() -> None:
             "OCR_HOST": "10.0.7.49",
             "OCR_PORT": "17494",
             "OCR_MODEL": "qwen3-vl:latest",
+            "OCR_BACKEND": "ollama",
             "OCR_OLLAMA_URL": "http://127.0.0.1:11434",
             "OCR_OLLAMA_KEEP_ALIVE": "2m",
             "OCR_IDLE_UNLOAD_SECONDS": "90",
             "OCR_MAX_UPLOAD_MB": "16",
+            "OCR_IMAGE_MAX_EDGE": "512",
+            "OCR_MAX_PASSES": "1",
+            "OCR_PIPELINE": "ocr",
         }
     )
 
     assert settings.host == "10.0.7.49"
     assert settings.port == 17494
+    assert settings.backend == "ollama"
     assert settings.model == "qwen3-vl:latest"
     assert settings.keep_alive == "2m"
     assert settings.idle_unload_seconds == 90.0
     assert settings.max_upload_mb == 16
+    assert settings.image_max_edge == 512
+    assert settings.max_passes == 1
+    assert settings.pipeline == "ocr"
     assert settings.validate_runtime() == []
 
 
@@ -40,3 +48,23 @@ def test_a_blank_host_falls_back_to_loopback() -> None:
 def test_missing_token_is_a_runtime_problem() -> None:
     settings = from_env({"OCR_PORT": "", "OCR_HOST": ""})
     assert any("TOKEN" in problem for problem in settings.validate_runtime())
+
+
+def test_llamacpp_backend_from_env() -> None:
+    settings = from_env(
+        {
+            "OCR_TOKEN": "t" * 40,
+            "OCR_BACKEND": "llamacpp",
+            "OCR_LLAMA_URL": "http://127.0.0.1:8081",
+            "OCR_MODEL": "qwen3-vl-2b",
+        }
+    )
+    assert settings.backend == "llamacpp"
+    assert settings.llama_url == "http://127.0.0.1:8081"
+    assert settings.model == "qwen3-vl-2b"
+    assert settings.validate_runtime() == []
+
+
+def test_unknown_backend_is_a_runtime_problem() -> None:
+    settings = from_env({"OCR_TOKEN": "t" * 40, "OCR_BACKEND": "vllm"})
+    assert any("BACKEND" in problem for problem in settings.validate_runtime())

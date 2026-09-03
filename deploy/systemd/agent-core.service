@@ -10,9 +10,9 @@ WorkingDirectory=%h/agent-core
 EnvironmentFile=%h/agent-core/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=%h/.local/bin:%h/agent-core/.venv/bin:/usr/local/bin:/usr/bin:/bin
-Environment=TMPDIR=%h/bulk/assistant/tmp
-Environment=TEMP=%h/bulk/assistant/tmp
-Environment=TMP=%h/bulk/assistant/tmp
+Environment=TMPDIR=%h/assistant/tmp
+Environment=TEMP=%h/assistant/tmp
+Environment=TMP=%h/assistant/tmp
 # Cursor AppImage leaks ARGV0 into the session; without this the venv python becomes the AppImage.
 UnsetEnvironment=ARGV0
 UnsetEnvironment=APPDIR
@@ -39,7 +39,7 @@ PrivateTmp=true
 ReadOnlyPaths=%h/tg_bot_kirpich
 ReadOnlyPaths=%h/agent-core/.env
 ReadOnlyPaths=%h/.config/systemd/user/agent-core.service
-ReadWritePaths=%h/bulk/assistant
+ReadWritePaths=%h/assistant
 
 StandardOutput=journal
 StandardError=journal

@@ -61,6 +61,10 @@ class FakeEngine:
         return "fake-qwen3-vl"
 
     @property
+    def backend_reachable(self) -> bool:
+        return self._ollama_ok
+
+    @property
     def ollama_reachable(self) -> bool:
         return self._ollama_ok
 

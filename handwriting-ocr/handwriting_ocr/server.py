@@ -56,14 +56,16 @@ class OcrApp:
         return hmac.compare_digest(header[len("Bearer ") :].strip(), self.settings.token)
 
     def health(self) -> dict[str, Any]:
-        ollama_ok = getattr(self.engine, "ollama_reachable", False)
+        backend_ok = getattr(self.engine, "backend_reachable", False)
         if hasattr(self.engine, "probe"):
-            ollama_ok = self.engine.probe()
+            backend_ok = self.engine.probe()
         return {
             "status": "ok",
             "model": self.engine.model_name,
             "model_loaded": self.engine.ready,
-            "ollama_reachable": bool(ollama_ok),
+            "backend_reachable": bool(backend_ok),
+            # Kept for older Core /health readers; same value as backend_reachable.
+            "ollama_reachable": bool(backend_ok),
             "queued": self.store.queue_depth(),
         }
 

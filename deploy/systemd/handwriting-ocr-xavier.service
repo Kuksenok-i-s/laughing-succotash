@@ -1,0 +1,32 @@
+[Unit]
+# User unit for handwriting OCR on Jetson Xavier. Talks to local Ollama (JetPack 5).
+Description=Handwriting OCR service (Qwen3-VL via Ollama)
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/tg_bot_kirpich
+EnvironmentFile=%h/.config/handwriting-ocr/service.env
+Environment=PYTHONPATH=%h/tg_bot_kirpich/handwriting-ocr
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:%h/.assistant/venv-ocr/bin:/usr/bin:/bin
+Environment=TMPDIR=%h/.handwriting-ocr/tmp
+Environment=TEMP=%h/.handwriting-ocr/tmp
+Environment=TMP=%h/.handwriting-ocr/tmp
+ExecStart=%h/.assistant/venv-ocr/bin/python -m handwriting_ocr.main
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=handwriting-ocr
+
+[Install]
+WantedBy=default.target

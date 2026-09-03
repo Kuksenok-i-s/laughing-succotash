@@ -7,7 +7,7 @@ A personal AI assistant with a Telegram interface, split across two machines.
            │
   ┌────────▼─────────┐        JSON-RPC 2.0        ┌──────────────────────┐
   │ Telegram Gateway │◄───  over persistent  ────►│      Agent Core      │
-  │   (Linux VPS)    │           WSS              │   (Intel Mac mini)   │
+  │   (Linux VPS)    │           WSS              │ (Jetson Xavier)      │
   │                  │   (the Core dials out)     │                      │
   │ aiogram          │                            │ Cursor Agent (ACP)   │
   │ delivery queue   │                            │ Whisper large-v3     │
@@ -42,7 +42,7 @@ yes. See [ADR 0007](docs/adr/0007-tool-permission-model.md).
 | `telegram-gateway/` | Deploy unit A — the Telegram side |
 | `agent-core/` | Deploy unit B — everything else |
 | `gpu-transcriber/` | Deploy unit C — optional; whisper on a GPU host behind an HTTP API |
-| `handwriting-ocr/` | Deploy unit D — optional; Qwen3-VL handwriting OCR via Ollama on a GPU host |
+| `handwriting-ocr/` | Deploy unit D — optional; OvisOCR2 handwriting OCR via llama.cpp on `10.0.7.98` |
 | `packages/pa-protocol/` | The wire protocol both sides share |
 | `tests/` | End-to-end tests that run both units together |
 | `deploy/` | systemd, launchd and nginx examples |
@@ -57,8 +57,8 @@ runtime.
 LAN, and falls back to transcribing on its own CPU when it is absent. See
 [ADR 0008](docs/adr/0008-transcription-service-on-the-gpu-host.md).
 
-`handwriting-ocr/` is likewise optional and remote-only: photos are recognised by Qwen3-VL through
-Ollama on the GPU host, with no local fallback. See
+`handwriting-ocr/` is likewise optional and remote-only: photos are recognised by OvisOCR2 through
+llama.cpp (`llama-server`) on `10.0.7.98`, with no local fallback. See
 [ADR 0009](docs/adr/0009-remote-handwriting-ocr.md).
 
 ## Documentation

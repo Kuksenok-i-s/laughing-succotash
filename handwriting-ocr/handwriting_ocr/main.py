@@ -8,11 +8,33 @@ import sys
 import threading
 
 from .config import Settings, from_env
-from .engine import OllamaEngine
+from .engine import Engine, LlamaCppEngine, OllamaEngine
 from .jobs import JobStore
 from .logging_setup import configure_logging
 from .server import OcrApp, OcrServer
 from .worker import OcrWorker
+
+
+def build_engine(settings: Settings) -> Engine:
+    if settings.backend == "llamacpp":
+        return LlamaCppEngine(
+            llama_url=settings.llama_url,
+            model=settings.model,
+            request_timeout=settings.request_timeout,
+            max_tokens=settings.max_tokens,
+            image_max_edge=settings.image_max_edge,
+            max_passes=settings.max_passes,
+            pipeline=settings.pipeline,
+        )
+    return OllamaEngine(
+        ollama_url=settings.ollama_url,
+        model=settings.model,
+        keep_alive=settings.keep_alive,
+        request_timeout=settings.request_timeout,
+        image_max_edge=settings.image_max_edge,
+        max_passes=settings.max_passes,
+        pipeline=settings.pipeline,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -21,12 +43,7 @@ class Service:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._store = JobStore(settings.work_dir, ttl_seconds=settings.job_ttl_seconds)
-        self._engine = OllamaEngine(
-            ollama_url=settings.ollama_url,
-            model=settings.model,
-            keep_alive=settings.keep_alive,
-            request_timeout=settings.request_timeout,
-        )
+        self._engine = build_engine(settings)
         self._app = OcrApp(settings, self._store, self._engine)
         self._worker = OcrWorker(
             self._store,
@@ -44,10 +61,11 @@ class Service:
         self._spawn("ocr", lambda: self._worker.run(self._stop))
         self._spawn("sweeper", self._sweep_forever)
         log.info(
-            "listening on %s:%d (work dir %s, model=%s)",
+            "listening on %s:%d (work dir %s, backend=%s model=%s)",
             self._settings.host,
             self._server.server_address[1],
             self._settings.work_dir,
+            self._settings.backend,
             self._settings.model,
         )
 

@@ -1,0 +1,35 @@
+[Unit]
+# System unit for handwriting OCR on the llama.cpp host (10.0.7.98).
+# Talks to local llama-server VL on 127.0.0.1:8081. The job API is on the LAN.
+Description=Handwriting OCR service (Qwen3-VL via llama.cpp)
+After=network-online.target llama-server-ocr.service
+Wants=network-online.target llama-server-ocr.service
+
+[Service]
+Type=simple
+User=nvidia
+Group=nvidia
+WorkingDirectory=/home/nvidia/handwriting-ocr
+EnvironmentFile=/home/nvidia/.config/handwriting-ocr/service.env
+Environment=PYTHONPATH=/home/nvidia/handwriting-ocr
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/nvidia/.local/bin:/home/nvidia/.assistant/venv-ocr/bin:/usr/bin:/bin
+Environment=TMPDIR=/home/nvidia/.handwriting-ocr/tmp
+Environment=TEMP=/home/nvidia/.handwriting-ocr/tmp
+Environment=TMP=/home/nvidia/.handwriting-ocr/tmp
+ExecStart=/home/nvidia/.assistant/venv-ocr/bin/python -m handwriting_ocr.main
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=handwriting-ocr
+
+[Install]
+WantedBy=multi-user.target

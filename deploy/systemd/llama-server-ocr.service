@@ -1,0 +1,42 @@
+[Unit]
+# Dedicated VL instance on loopback :8081. Do not run this together with the text 7B
+# llama-server.service on a 14GB AGX — unified memory OOMs and the board hangs.
+# handwriting-ocr talks to this process; Core talks only to :17494.
+Description=llama.cpp VL server (OvisOCR2 for handwriting OCR)
+After=network-online.target
+Wants=network-online.target
+Conflicts=llama-server.service
+
+[Service]
+Type=simple
+User=nvidia
+Group=nvidia
+WorkingDirectory=/home/nvidia/llama.cpp/build/bin
+Environment=PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LD_LIBRARY_PATH=/home/nvidia/llama.cpp/build/bin:/usr/local/cuda/lib64:/usr/local/cuda/targets/aarch64-linux/lib
+ExecStart=/home/nvidia/llama.cpp/build/bin/llama-server \
+    -m /home/nvidia/models/OvisOCR2.Q8_0.gguf \
+    --mmproj /home/nvidia/models/OvisOCR2.mmproj-q8_0.gguf \
+    --host 127.0.0.1 \
+    --port 8081 \
+    -ngl 99 \
+    -c 4096 \
+    -np 1 \
+    --n-predict 2048 \
+    --image-max-tokens 512 \
+    --repeat-penalty 1.15 \
+    --dry-multiplier 0.8 \
+    --flash-attn off \
+    -fit off \
+    --alias ovis-ocr2 \
+    --sleep-idle-seconds 600
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+# If mmproj spikes past this, kill the process instead of hanging the 14GB AGX.
+MemoryAccounting=yes
+MemoryMax=8G
+OOMPolicy=kill
+
+[Install]
+WantedBy=multi-user.target

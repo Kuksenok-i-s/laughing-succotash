@@ -24,10 +24,20 @@ class Settings:
     port: int = DEFAULT_PORT
     token: str = ""
 
+    # ollama = /api/chat on OCR_OLLAMA_URL; llamacpp = OpenAI /v1 on OCR_LLAMA_URL.
+    backend: str = "ollama"
     ollama_url: str = "http://127.0.0.1:11434"
+    llama_url: str = "http://127.0.0.1:8081"
     model: str = "qwen3-vl:2b"
     keep_alive: str = "10m"
     request_timeout: float = 600.0
+    max_tokens: int = 2048
+    # Long-edge cap in pixels for every image sent to the VL model.
+    image_max_edge: int = 512
+    # 3 = triage + correct + markdown. 1 = triage only (safer on 14GB AGX).
+    max_passes: int = 3
+    # triage = Qwen-style kind JSON. ocr = one-shot document prompt (OvisOCR2 / GLM-OCR).
+    pipeline: str = "triage"
 
     work_dir: Path = Path("~/.handwriting-ocr").expanduser()
     job_ttl_seconds: float = 6 * 3600.0
@@ -51,6 +61,10 @@ class Settings:
             problems.append(f"{ENV_PREFIX}TOKEN is shorter than 32 characters")
         if not self.model.strip():
             problems.append(f"{ENV_PREFIX}MODEL is empty")
+        if self.backend not in {"ollama", "llamacpp"}:
+            problems.append(f"{ENV_PREFIX}BACKEND must be ollama or llamacpp")
+        if self.pipeline not in {"triage", "ocr"}:
+            problems.append(f"{ENV_PREFIX}PIPELINE must be triage or ocr")
         return problems
 
 
@@ -77,10 +91,16 @@ def from_env(env: Mapping[str, str] | None = None) -> Settings:
         host=text("HOST", defaults.host),
         port=number("PORT", defaults.port),
         token=text("TOKEN", defaults.token),
+        backend=text("BACKEND", defaults.backend).strip().lower(),
         ollama_url=text("OLLAMA_URL", defaults.ollama_url).rstrip("/"),
+        llama_url=text("LLAMA_URL", defaults.llama_url).rstrip("/"),
         model=text("MODEL", defaults.model),
         keep_alive=text("OLLAMA_KEEP_ALIVE", defaults.keep_alive),
         request_timeout=seconds("REQUEST_TIMEOUT", defaults.request_timeout),
+        max_tokens=number("MAX_TOKENS", defaults.max_tokens),
+        image_max_edge=number("IMAGE_MAX_EDGE", defaults.image_max_edge),
+        max_passes=number("MAX_PASSES", defaults.max_passes),
+        pipeline=text("PIPELINE", defaults.pipeline).strip().lower(),
         work_dir=(
             Path(work_dir).expanduser().resolve() if work_dir else defaults.work_dir
         ),

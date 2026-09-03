@@ -7,17 +7,19 @@ Installing, running and repairing the parts of the system.
 | Machine | Needs |
 | --- | --- |
 | Gateway (Linux VPS `45.148.60.90`) | Python 3.12+, Telegram bot token; RPC on port 17492 |
-| Core + STT + OCR (`nvidia@10.0.7.127`, Jetson Xavier) | Python 3.13 (uv), `ffmpeg`, `cursor-agent` logged in, Ollama JetPack 5 |
+| Core + STT (`nvidia@10.0.7.127`, Jetson Xavier) | Python 3.13 (uv), `ffmpeg`, `cursor-agent` logged in |
+| OCR (`nvidia@10.0.7.98`, Jetson AGX) | llama.cpp `llama-server` + `handwriting-ocr` (OvisOCR2) |
 | GPU host (`10.0.7.49`) | Former Core/STT/OCR host; units left in place as spare |
 
 The Gateway must be reachable from the Core; the Core needs no inbound access at all. That
 asymmetry is deliberate — see [ADR 0002](adr/0002-jsonrpc-over-websocket.md).
 
 Durable Core state lives on Xavier at `/home/nvidia/assistant`. Whisper (`gpu-transcriber`,
-large-v3 float16 on the Xavier GPU — CTranslate2 4.8.1 built for CUDA 11.4 / sm_72) and
-handwriting OCR (`handwriting-ocr` → local Ollama `qwen3-vl:2b`, JetPack 5 CUDA) are loopback
-services on the same machine (`:17493` / `:17494`). YouTube still downloads through the VPS: one
-file at a time, then the file is pulled onto `/home/nvidia/assistant/youtube`.
+large-v3 float16 on the Xavier GPU — CTranslate2 4.8.1 built for CUDA 11.4 / sm_72) stays on
+loopback (`:17493`). Handwriting OCR runs on `10.0.7.98`: `llama-server` serves OvisOCR2 on
+loopback `:8081`, and `handwriting-ocr` publishes the job API on `:17494`. YouTube still
+downloads through the VPS: one file at a time, then the file is pulled onto
+`/home/nvidia/assistant/youtube`.
 
 ## Shared secret
 
@@ -204,7 +206,7 @@ curl -sf http://<gpu-host>:17493/health
 ```
 
 `model_loaded: false` right after a start, or after ten minutes of quiet, is correct: Whisper
-drops `large-v3` (and OCR drops Qwen3-VL) so the two can share one card. The next job reloads
+drops `large-v3` (and OCR drops OvisOCR2) so the two can share one card. The next job reloads
 the weights; `/health` still answers and jobs queue rather than fail. Then set `STT_BACKEND=gpu`,
 `STT_GPU_URL` and `STT_GPU_TOKEN` in the Core's `.env` and restart it.
 The Core logs `transcription service ready at ...` at startup; a `transcription service unreachable`
@@ -212,34 +214,32 @@ there means the token, the address or the firewall.
 
 ## Handwriting OCR (`handwriting-ocr`)
 
-Optional fourth unit on the GPU host `10.0.7.49` (Whisper / Ollama). Agent Core runs on
-`10.0.7.46` and reaches this service over the LAN. Ollama must already serve `qwen3-vl` on
-localhost of the GPU host; only the OCR job API is published on the LAN.
+Optional fourth unit on `10.0.7.98` (llama.cpp). Agent Core on Xavier (`10.0.7.127`) reaches
+this service over the LAN. A dedicated `llama-server` serves OvisOCR2 on localhost `:8081`;
+the existing text 7B on `:8080` is left alone. Only the OCR job API is published on the LAN.
 
 ```bash
-# on GPU host 10.0.7.49
-git clone <repo> ~/handwriting-ocr/src
-ollama pull qwen3-vl
+# on OCR host 10.0.7.98
+# VL weights: ~/models/OvisOCR2.Q8_0.gguf + OvisOCR2.mmproj-q8_0.gguf
 
 install -d -m 700 ~/.config/handwriting-ocr ~/.handwriting-ocr/tmp
-install -m 600 ~/handwriting-ocr/src/handwriting-ocr/service.env.example \
-        ~/.config/handwriting-ocr/service.env
+install -m 600 ~/handwriting-ocr/service.env.example ~/.config/handwriting-ocr/service.env
 "${EDITOR:-vi}" ~/.config/handwriting-ocr/service.env   # set OCR_TOKEN
 
-cp ~/handwriting-ocr/src/deploy/systemd/handwriting-ocr.service ~/.config/systemd/user/
-# Adjust PYTHONPATH / WorkingDirectory in the unit if the checkout path differs.
-systemctl --user daemon-reload
-systemctl --user enable --now handwriting-ocr
+sudo cp deploy/systemd/llama-server-ocr.service /etc/systemd/system/
+sudo cp deploy/systemd/handwriting-ocr-llamacpp.service /etc/systemd/system/handwriting-ocr.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now llama-server-ocr handwriting-ocr
 
-# from Core host 10.0.7.46
-curl -sf http://10.0.7.49:17494/health
+# from Core host 10.0.7.127
+python3 -c 'import urllib.request; print(urllib.request.urlopen("http://10.0.7.98:17494/health").read())'
 ```
 
-Then on Core (`10.0.7.46`) set `OCR_ENABLED=true`, `OCR_SERVICE_URL=http://10.0.7.49:17494` and
+Then on Core (`10.0.7.127`) set `OCR_ENABLED=true`, `OCR_SERVICE_URL=http://10.0.7.98:17494` and
 `OCR_SERVICE_TOKEN` (same value as `OCR_TOKEN`) in `.env` and restart. There is no local OCR
-fallback: if the service is down, the photo job fails with `ocr_unavailable`. After ten minutes
-without a job both GPU services unload on their own (`GPU_STT_IDLE_UNLOAD_SECONDS` /
-`OCR_IDLE_UNLOAD_SECONDS`, default 600). `POST /v1/model/unload` still forces OCR off immediately.
+fallback: if the service is down, the photo job fails with `ocr_unavailable`. The VL
+`llama-server` sleeps after `--sleep-idle-seconds` (600). `POST /v1/model/unload` only clears
+the OCR worker's ready flag; llama-server keeps the weights.
 
 ## First run checklist
 

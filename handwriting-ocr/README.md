@@ -1,7 +1,7 @@
 # Handwriting OCR / photo triage
 
-Qwen3-VL on the GPU host `10.0.7.49` (Ollama). Agent Core on `10.0.7.46` uploads a photo and
-collects either a scene description or clean Markdown.
+Qwen3-VL on `10.0.7.98` (llama.cpp `llama-server`) or on a host with Ollama. Agent Core uploads
+a photo and collects either a scene description or clean Markdown.
 
 ```
 original image
@@ -19,7 +19,8 @@ original image
 ```
 
 This process is not a general-purpose API. It has no TLS, no rate limiting and no notion of users —
-one bearer token, one LAN, one client. Ollama itself stays on localhost.
+one bearer token, one LAN, one client. The infer backend (`OCR_BACKEND=llamacpp` or `ollama`)
+stays on localhost.
 
 ## Layout
 
