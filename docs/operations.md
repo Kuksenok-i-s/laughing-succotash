@@ -7,16 +7,17 @@ Installing, running and repairing the parts of the system.
 | Machine | Needs |
 | --- | --- |
 | Gateway (Linux VPS `45.148.60.90`) | Python 3.12+, Telegram bot token; RPC on port 17492 |
-| Core + GPU (`10.0.7.49`) | Python 3.13+, `ffmpeg`, `cursor-agent` logged in, NVIDIA GPU, Ollama |
-| Mac mini (`10.0.7.46`) | Former Core host; launch agent disabled after the 2026-08-28 move |
+| Core + STT + OCR (`nvidia@10.0.7.127`, Jetson Xavier) | Python 3.13 (uv), `ffmpeg`, `cursor-agent` logged in, Ollama JetPack 5 |
+| GPU host (`10.0.7.49`) | Former Core/STT/OCR host; units left in place as spare |
 
 The Gateway must be reachable from the Core; the Core needs no inbound access at all. That
 asymmetry is deliberate — see [ADR 0002](adr/0002-jsonrpc-over-websocket.md).
 
-Durable Core state lives on this GPU host at `/home/ilya/bulk/assistant` (`~/bulk` →
-`/mnt/generic_storage`). Whisper and handwriting OCR are loopback/LAN services on the same
-machine (`:17493` / `:17494`). YouTube still downloads through the VPS: one file at a time, then
-the file is pulled onto `/home/ilya/bulk/assistant/youtube`.
+Durable Core state lives on Xavier at `/home/nvidia/assistant`. Whisper (`gpu-transcriber`,
+large-v3 float16 on the Xavier GPU — CTranslate2 4.8.1 built for CUDA 11.4 / sm_72) and
+handwriting OCR (`handwriting-ocr` → local Ollama `qwen3-vl:2b`, JetPack 5 CUDA) are loopback
+services on the same machine (`:17493` / `:17494`). YouTube still downloads through the VPS: one
+file at a time, then the file is pulled onto `/home/nvidia/assistant/youtube`.
 
 ## Shared secret
 
@@ -175,9 +176,26 @@ systemctl --user enable --now gpu-transcriber
 journalctl --user -u gpu-transcriber -f
 ```
 
-`LD_LIBRARY_PATH` in the unit is not optional: `ctranslate2` loads cuBLAS from the `nvidia` wheels
-inside the virtualenv and will not find them on its own. If the Python version in the virtualenv
-changes, that path changes with it.
+`LD_LIBRARY_PATH` in the unit is not optional. On the spare x86 GPU host `ctranslate2` loads
+cuBLAS from the `nvidia` wheels inside the virtualenv; on Xavier it must point at
+`~/.local/opt/ctranslate2/lib` (the CUDA 11.4 build) and `/usr/local/cuda/lib64`.
+
+PyPI's aarch64 `ctranslate2` wheel has no CUDA. On Xavier the library is built from
+CTranslate2 4.8.1 inside `nvcr.io/nvidia/l4t-pytorch:r35.2.1-pth2.0-py3` (nvcc 11.4, sm_72,
+flash-attention off). `src/ops/mean_gpu.cu` is patched: CUDA 11.4 cannot do `bfloat16 /= float`.
+The recipe and the patch live in `deploy/xavier/`. Rebuild:
+
+```bash
+# on nvidia@10.0.7.127; stop ollama / gpu-transcriber first so make has RAM
+~/tg_bot_kirpich/deploy/xavier/build-ctranslate2-cuda.sh
+```
+
+Xavier cannot clone GitHub. If `$HOME/.local/src/CTranslate2` is missing, rsync a
+`v4.8.1` tree (submodules included) onto that path, then run the script. It installs the
+`.so` under `~/.local/opt/ctranslate2` and replaces the CPU wheel in
+`~/.assistant/venv-whisper`. Then `GPU_STT_DEVICE=cuda` and `GPU_STT_COMPUTE_TYPE=float16`
+in `~/.config/gpu-transcriber/service.env`, and the Xavier unit from
+`deploy/systemd/gpu-transcriber-xavier.service`.
 
 Verify from the Mini, which is the only client that matters:
 
@@ -307,11 +325,11 @@ lost one.
 
 | Data | Machine | Lost if the disk dies |
 | --- | --- | --- |
-| Reminders, tasks, notes, memory, contacts, calendar, sessions, YouTube library | Core (`/home/ilya/bulk/assistant` on `10.0.7.49`) | Everything the assistant knows |
+| Reminders, tasks, notes, memory, contacts, calendar, sessions, YouTube library | Core (`/home/nvidia/assistant` on `10.0.7.127`) | Everything the assistant knows |
 | Pending requests, pending uploads, delivery state, callback tokens | Gateway | A few in-flight messages |
-| Audio being transcribed, OCR spool | GPU host (same machine as Core) | The job that was running |
+| Audio being transcribed, OCR spool | Xavier (same machine as Core) | The job that was running |
 
-Back up `/home/ilya/bulk/assistant/core.sqlite3`. The Gateway's database is not worth backing up, which
+Back up `/home/nvidia/assistant/core.sqlite3`. The Gateway's database is not worth backing up, which
 is the point of keeping it purely transport state.
 
 Audio is never kept. The Gateway deletes its copy once the Core acknowledges the upload, the Core
