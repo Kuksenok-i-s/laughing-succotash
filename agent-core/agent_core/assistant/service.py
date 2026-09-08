@@ -36,9 +36,11 @@ from ..youtube.documents import (
     summary_markdown,
     telegram_title,
     transcript_markdown,
+    topic_contents,
     unique_dir,
 )
 from ..youtube.urls import YoutubeLink
+from ..youtube.topics import transcript_topics
 from . import attribution, prompts
 
 log = logging.getLogger(__name__)
@@ -83,6 +85,7 @@ class AssistantService:
         self._file_delivery = file_delivery
         self._album_locks: dict[str, asyncio.Lock] = {}
         self._long_audio_notices: set[str] = set()
+        self._turn_locks: dict[str, asyncio.Lock] = {}
 
     # ---- intake ---------------------------------------------------------
 
@@ -116,7 +119,7 @@ class AssistantService:
             runner = self._wrap(
                 job, lambda: self._run_youtube(job, youtube_link, params.text or "")
             )
-            lane = f"youtube:{params.user_id}"
+            lane = f"transcription:{params.user_id}"
         elif params.kind == "command":
             runner = self._wrap(job, lambda: self._run_command(job, params.command or ""))
             # Control commands run on their own lane. /cancel queued behind the job it is meant to
@@ -160,7 +163,7 @@ class AssistantService:
             return job.job_id
 
         await self._jobs.submit(
-            conversation.conversation_id,
+            f"transcription:{upload.user_id}",
             job.job_id,
             self._wrap(job, lambda: self._run_audio(job, upload)),
         )
@@ -349,6 +352,11 @@ class AssistantService:
             await self._repos.conversations.get_or_create_conversation(job.user_id)
         ).conversation_id
 
+        lock = self._turn_locks.setdefault(conversation_id, asyncio.Lock())
+        async with lock:
+            return await self._converse_locked(job, message, provenance, wrap, conversation_id)
+
+    async def _converse_locked(self, job, message, provenance, wrap, conversation_id) -> str:
         session, is_new = await self._sessions.ensure_session(
             conversation_id, user_id=job.user_id
         )
@@ -488,16 +496,41 @@ class AssistantService:
         total = len(uploads)
         await self._progress(job, "recognizing_album", progress=0.0)
         sections: list[tuple[str, OcrResult]] = []
+        stopped_at: int | None = None
         for index, upload in enumerate(uploads, start=1):
-            result = await self._recognize_image(job, upload, stage="recognizing_album")
+            try:
+                result = await self._recognize_image(job, upload, stage="recognizing_album")
+            except OcrError:
+                if not sections:
+                    raise
+                stopped_at = index
+                log.warning(
+                    "album %s: OCR failed on photo %d/%d after %d ok",
+                    job.job_id,
+                    index,
+                    total,
+                    len(sections),
+                    exc_info=True,
+                )
+                break
             sections.append((f"Фото {index}/{total}", result))
             await self._progress(
                 job, "recognizing_album", progress=min(index / max(total, 1), 0.95)
             )
 
+        if stopped_at is not None and self._uploads is not None:
+            for leftover in uploads[stopped_at:]:
+                await self._uploads.release(leftover)
+
         caption = (job.payload.get("caption") or "").strip() or None
         has_text = any(
             (r.kind != "other") and (r.markdown or r.raw_text).strip() for _, r in sections
+        )
+        truncated = (
+            f"\n\n_Не удалось прочитать фото {stopped_at}/{total} "
+            f"и следующие: OCR-хост перестал отвечать._"
+            if stopped_at is not None
+            else ""
         )
 
         if has_text:
@@ -507,7 +540,7 @@ class AssistantService:
                 if not body:
                     body = "_(пусто)_"
                 chunks.append(f"## {title}\n\n{body}")
-            markdown = "\n\n".join(chunks)
+            markdown = "\n\n".join(chunks) + truncated
             if (
                 self.journal is not None
                 and not _is_foreign(job)
@@ -521,7 +554,7 @@ class AssistantService:
         for title, result in sections:
             desc = (result.description or "").strip() or "_(нет описания)_"
             descriptions.append(f"## {title}\n\n{desc}")
-        combined = "\n\n".join(descriptions)
+        combined = "\n\n".join(descriptions) + truncated
         if not combined.strip():
             raise OcrError("no text detected in the image")
         await self._analyze_image_scene(job, combined, caption=caption, album=True)
@@ -820,11 +853,15 @@ class AssistantService:
         duration = result.duration or media.duration
         await self._progress(job, "summarizing", detail=shown)
         summary_body = await self._youtube_summary(job, title, result)
+        topics = await self._youtube_topics(job, result)
+        contents = topic_contents(media.url, result, topics)
+        if contents:
+            summary_body = "## Темы\n\n" + contents + "\n\n" + summary_body
         summary_doc = summary_markdown(
             title=title, url=media.url, duration=duration, body=summary_body
         )
         transcript_doc = transcript_markdown(
-            title=title, url=media.url, transcription=result
+            title=title, url=media.url, transcription=result, topics=topics
         )
         saved = self._youtube_save_docs(
             title, [("конспект", summary_doc), ("транскрипт", transcript_doc)]
@@ -881,11 +918,15 @@ class AssistantService:
             duration = result.duration or media.duration
             await self._progress(job, "summarizing", detail=label)
             summary_body = await self._youtube_summary(job, title, result)
+            topics = await self._youtube_topics(job, result)
+            contents = topic_contents(media.url, result, topics)
+            if contents:
+                summary_body = "## Темы\n\n" + contents + "\n\n" + summary_body
             summary_doc = summary_markdown(
                 title=title, url=media.url, duration=duration, body=summary_body
             )
             transcript_doc = transcript_markdown(
-                title=title, url=media.url, transcription=result
+                title=title, url=media.url, transcription=result, topics=topics
             )
             processed.append(
                 (title, media.url, summary_doc, transcript_doc, duration, media.index)
@@ -991,6 +1032,14 @@ class AssistantService:
             ),
             delivery_id=f"{job.job_id}:long-audio",
             user_id=job.user_id,
+        )
+
+    async def _youtube_topics(self, job: Job, result: TranscriptionResult) -> dict[int, str]:
+        await self._progress(job, "summarizing", detail="разделение на темы")
+        context = await self._turn_context(job, Provenance.UNTRUSTED_CONTENT)
+        return await transcript_topics(
+            self._backend, self._settings.user_workspace(job.user_id), context, result,
+            chunk_chars=self._settings.transcript_chunk_chars,
         )
 
     async def _youtube_summary(

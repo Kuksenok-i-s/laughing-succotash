@@ -1,0 +1,33 @@
+[Unit]
+# Reverse tunnel from this GPU host to Xavier. Xavier cannot initiate TCP to 10.0.7.49
+# (inbound from 10.0.7.127 is dropped), so Core on Xavier reaches STT/OCR via its loopback.
+# Install on the GPU host: ~/.config/systemd/user/ and enable with
+#   systemctl --user enable --now gpu-xavier-tunnel
+Description=Reverse SSH tunnel: Xavier loopback -> GPU STT/OCR
+Documentation=https://github.com/yourname/personal-assistant/blob/main/docs/operations.md
+After=network-online.target gpu-transcriber.service handwriting-ocr.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N \
+    -F none \
+    -i %h/.ssh/id_rsa_nvidia \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=yes \
+    -R 17493:127.0.0.1:17493 \
+    -R 17494:127.0.0.1:17494 \
+    nvidia@10.0.7.127
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpu-xavier-tunnel
+
+[Install]
+WantedBy=default.target

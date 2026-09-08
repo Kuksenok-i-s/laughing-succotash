@@ -81,7 +81,9 @@ class Settings(BaseSettings):
     temp_dir: Path | None = None
 
     # --- Agent ---
-    agent_backend: str = "acp"  # "acp" | "cli"
+    agent_backend: str = "acp"  # "acp" (Cursor) | "codex-acp"
+    codex_acp_binary: str = "codex-acp"
+    codex_model: str | None = None
     cursor_agent_binary: str = "cursor-agent"
     cursor_model: str | None = None
     agent_startup_timeout: float = 60.0
@@ -95,11 +97,30 @@ class Settings(BaseSettings):
     mcp_port: int = 8931
     mcp_token: str = ""
 
+    # --- Yandex Calendar (CalDAV) ---
+    # Only this Telegram user is routed to Yandex. Everyone else keeps the local calendar.
+    yandex_calendar_user_id: str | None = None
+    yandex_calendar_username: str = ""
+    yandex_calendar_app_password: str = ""
+    yandex_calendar_name: str | None = None
+    yandex_calendar_url: str = "https://caldav.yandex.ru/"
+
+    @field_validator("yandex_calendar_user_id", mode="before")
+    @classmethod
+    def _namespace_yandex_user(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return None
+        text = str(value).strip()
+        return text if ":" in text else f"tg:{text}"
+
     # --- STT ---
     # local = faster-whisper on this machine; gpu = the transcription service on the CUDA host.
     stt_backend: str = "local"
     stt_gpu_url: str = "http://127.0.0.1:17493"
     stt_gpu_token: str = ""
+    # Second Jetson (OCR host). Used for parallel 10-minute chunks when OCR is idle.
+    stt_gpu_secondary_url: str = ""
+    stt_gpu_secondary_token: str = ""
     stt_gpu_poll_interval: float = 2.0
     stt_gpu_request_timeout: float = 30.0
     stt_gpu_upload_timeout: float = 900.0
@@ -112,6 +133,8 @@ class Settings(BaseSettings):
     stt_max_concurrent: int = 1
     stt_beam_size: int = 5
     stt_vad_filter: bool = True
+    stt_chunk_seconds: float = 600.0
+    stt_chunk_overlap_seconds: float = 2.0
     max_audio_size_mb: int = 500
     max_audio_duration_seconds: int = 36000
     # Warn and keep going in the background once a recording is this long. 0 disables.
@@ -268,6 +291,21 @@ class Settings(BaseSettings):
         for user in self.allowed_users:
             if ":" not in user:
                 problems.append(f"ALLOWED_USERS entry {user!r} must be namespaced, e.g. 'tg:123'")
+        yandex_values = (
+            self.yandex_calendar_user_id,
+            self.yandex_calendar_username,
+            self.yandex_calendar_app_password,
+        )
+        if any(yandex_values) and not all(yandex_values):
+            problems.append(
+                "YANDEX_CALENDAR_USER_ID, YANDEX_CALENDAR_USERNAME and "
+                "YANDEX_CALENDAR_APP_PASSWORD must be set together"
+            )
+        if (
+            self.yandex_calendar_user_id
+            and self.yandex_calendar_user_id not in self.allowed_users
+        ):
+            problems.append("YANDEX_CALENDAR_USER_ID must also be present in ALLOWED_USERS")
         try:
             _ = self.timezone
         except ValueError as exc:

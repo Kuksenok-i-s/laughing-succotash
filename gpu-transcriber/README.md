@@ -18,8 +18,10 @@ gpu_transcriber/
 ├── config.py          settings from the environment
 ├── server.py          five endpoints on ThreadingHTTPServer
 ├── jobs.py            job registry, audio spool, queue, TTL sweep
-├── worker.py          the single thread that owns the GPU
-└── engine.py          faster-whisper, loaded lazily and dropped after idle
+├── worker.py          the single thread that dispatches GPU jobs
+├── chunks.py          split long audio, stitch transcripts
+├── process_engine.py  spawned model process, progress and result transport
+└── engine.py          faster-whisper inside the model process
 ```
 
 Standard library only, apart from `faster-whisper` itself. The virtualenv on the GPU host runs a
@@ -74,12 +76,20 @@ connections instead would send the Core to its CPU fallback for as long as that 
 `GPU_STT_IDLE_UNLOAD_SECONDS=600` (0 disables) drops `large-v3` so OCR can use the same card; the
 next job reloads it.
 
+Whisper runs in a separate spawned process. Idle unloading terminates and joins that process,
+releasing its CUDA context and native allocator pools; the HTTP server and job registry stay
+alive. A failed model process fails the current job, and the next job starts a fresh process.
+The child inherits the service's systemd memory cgroup. Clearing a Python reference alone does
+not guarantee that native memory is returned to the system.
+
 **The registry is in memory.** A restart loses jobs in flight; the Core sees a `404`, raises
 `SttError` and transcribes on the CPU. A durable queue would instead replay an hour of GPU work that
 nobody is waiting for any more.
 
-**One job at a time.** Two large-v3 runs on one card are slower together than one after the other,
-and the memory spike risks the process.
+**One job at a time on this card.** Two large-v3 runs on one GPU are slower together than one after
+the other. A recording longer than ``GPU_STT_CHUNK_SECONDS`` (ten minutes) is split and the slices
+run in sequence on this worker; the Core may send alternate slices to a second Jetson when OCR
+is idle there.
 
 **Audio is the only thing that grows.** It is deleted when the Core collects the result, and swept
 after `GPU_STT_JOB_TTL_SECONDS` otherwise — including spool directories left behind by a restart,

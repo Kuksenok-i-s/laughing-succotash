@@ -13,7 +13,9 @@ import threading
 import time
 from functools import partial
 
+from .chunks import DEFAULT_CHUNK_SECONDS, DEFAULT_OVERLAP_SECONDS, transcribe_audio
 from .engine import Engine
+from .gpu_lock import gpu_slot
 from .jobs import JobStore
 
 log = logging.getLogger(__name__)
@@ -26,16 +28,32 @@ class TranscriptionWorker:
         engine: Engine,
         *,
         poll_interval: float = 0.5,
+        gpu_lock_path: str = "",
         idle_unload_seconds: float = 600.0,
+        chunk_seconds: float = DEFAULT_CHUNK_SECONDS,
+        chunk_overlap_seconds: float = DEFAULT_OVERLAP_SECONDS,
+        probe=None,
+        extract=None,
     ) -> None:
+        self._gpu_lock_path = gpu_lock_path
         self._store = store
         self._engine = engine
         self._poll = poll_interval
         self._idle_unload = max(0.0, idle_unload_seconds)
+        self._chunk_seconds = chunk_seconds
+        self._chunk_overlap_seconds = chunk_overlap_seconds
+        self._probe = probe
+        self._extract = extract
         self._last_used = time.monotonic()
 
     def run(self, stop: threading.Event) -> None:
-        if not self._engine.ready:
+        try:
+            self._run(stop)
+        finally:
+            self._engine.unload()
+
+    def _run(self, stop: threading.Event) -> None:
+        if not self._gpu_lock_path and not self._engine.ready:
             try:
                 self._engine.load()
                 self._last_used = time.monotonic()
@@ -52,17 +70,34 @@ class TranscriptionWorker:
             self._maybe_unload()
 
     def run_job(self, job_id: str) -> None:
+        with gpu_slot(self._gpu_lock_path):
+            try:
+                self._run_owned_job(job_id)
+            finally:
+                if self._gpu_lock_path:
+                    self._engine.unload()
+
+    def _run_owned_job(self, job_id: str) -> None:
         job = self._store.get(job_id)
         if job is None:
             return
 
         started = time.monotonic()
         try:
-            result = self._engine.transcribe(
+            kwargs = {}
+            if self._probe is not None:
+                kwargs["probe"] = self._probe
+            if self._extract is not None:
+                kwargs["extract"] = self._extract
+            result = transcribe_audio(
+                self._engine,
                 job.audio_path,
                 language=job.language,
                 beam_size=job.beam_size,
                 on_progress=partial(self._report, job_id),
+                chunk_seconds=self._chunk_seconds,
+                overlap_seconds=self._chunk_overlap_seconds,
+                **kwargs,
             )
         except Exception as exc:
             log.exception("job %s failed", job_id)

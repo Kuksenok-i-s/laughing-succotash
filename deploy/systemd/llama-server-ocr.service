@@ -29,13 +29,14 @@ ExecStart=/home/nvidia/llama.cpp/build/bin/llama-server \
     --flash-attn off \
     -fit off \
     --alias ovis-ocr2 \
-    --sleep-idle-seconds 600
+    --sleep-idle-seconds 3600
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=180
 # If mmproj spikes past this, kill the process instead of hanging the 14GB AGX.
 MemoryAccounting=yes
 MemoryMax=8G
+MemorySwapMax=0
 OOMPolicy=kill
 
 [Install]

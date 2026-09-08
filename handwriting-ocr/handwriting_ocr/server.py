@@ -67,6 +67,7 @@ class OcrApp:
             # Kept for older Core /health readers; same value as backend_reachable.
             "ollama_reachable": bool(backend_ok),
             "queued": self.store.queue_depth(),
+            "running": self.store.running_count(),
         }
 
 

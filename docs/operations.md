@@ -238,8 +238,17 @@ python3 -c 'import urllib.request; print(urllib.request.urlopen("http://10.0.7.9
 Then on Core (`10.0.7.127`) set `OCR_ENABLED=true`, `OCR_SERVICE_URL=http://10.0.7.98:17494` and
 `OCR_SERVICE_TOKEN` (same value as `OCR_TOKEN`) in `.env` and restart. There is no local OCR
 fallback: if the service is down, the photo job fails with `ocr_unavailable`. The VL
-`llama-server` sleeps after `--sleep-idle-seconds` (600). `POST /v1/model/unload` only clears
+`llama-server` sleeps after `--sleep-idle-seconds` (3600; one hour). `POST /v1/model/unload` only clears
 the OCR worker's ready flag; llama-server keeps the weights.
+
+Deployment on 2026-09-05 uses `/home/nvidia/ocr-release-20260905/app` and its sibling `venv`
+via `/etc/systemd/system/handwriting-ocr.service.d/90-ocr-release.conf`. The previous app and
+venv remain in place. Root-only configuration backups are in
+`/home/nvidia/ocr-release-20260905/backup-20260905-132959` (manifest maps numbered files to
+original paths; an absent file was absent before deployment). Do not copy the backed-up
+service.env into logs: it contains the API token. The release passed all 53 tests on AGX,
+then a real API upload returned all eight control lines in one pass. Active settings:
+`OCR_MAX_PASSES=2`, `OCR_IDLE_UNLOAD_SECONDS=3600`, `OCR_OLLAMA_KEEP_ALIVE=1h`.
 
 ## First run checklist
 
@@ -336,3 +345,113 @@ Audio is never kept. The Gateway deletes its copy once the Core acknowledges the
 deletes its copy once transcription finishes — success or failure — and the GPU service deletes its
 spooled copy when the Core collects the result, or on a TTL sweep if nobody ever does. The
 transcript is the useful artefact; the recording is the sensitive one.
+
+## Проверяемые резервные копии (Xavier, сентябрь 2026)
+
+`assistant-backup.timer` запускает локальную копию ежедневно около 04:00 по времени платы.
+Инструменты: `/usr/local/lib/assistant-backup/`. Архивы: `/var/lib/assistant-backups/`,
+принадлежат root; на Xavier отдельная группа assistant-backup может только читать готовый архив.
+Сохраняются два последних автоматически созданных архива.
+Включены база, пользовательские каталоги и YouTube-библиотека; исключён временный `tmp/`.
+SQLite снимается через online backup API, поэтому учитываются подтверждённые изменения в WAL.
+Файлы копируются с проверкой неизменности размера/времени, но единой транзакции между файлами
+и базой нет: для строго согласованного общего снимка остановите записывающие сервисы.
+
+Проверка восстановления не меняет рабочие данные:
+
+```sh
+sudo python3 /usr/local/lib/assistant-backup/assistant_backup.py restore \
+  --archive /var/lib/assistant-backups/ARCHIVE.tar \
+  --target /var/lib/assistant-backups/NEW-RESTORE-DIRECTORY
+```
+
+Каталог назначения обязан отсутствовать. После распаковки проверяются SHA-256 каждого файла,
+целостность SQLite и внешние ключи. Ошибка удаляет только созданный проверочный каталог.
+Файлы восстанавливаются с закрытыми правами владельца; его executable-бит сохраняется.
+Символические ссылки и специальные файлы не поддерживаются и вызывают ошибку вместо
+незаметного пропуска. Фактическую замену рабочей базы инструмент не выполняет.
+
+Локальная копия не защищает от потери платы. AGX забирает архив по SSH каждый день около 05:00
+через assistant-backup-pull.timer, проверяет свежесть снимка SQLite, восстанавливает в отдельный
+каталог, сверяет SHA-256 и SQLite, затем сохраняет архив и удаляет проверочную распаковку.
+На AGX хранятся семь подтверждённых архивов; ротация выполняется только после успешной проверки.
+
+## Обновление Core с проверкой и откатом
+
+На текущем Xavier Core и GPU transcriber — системные сервисы:
+`systemctl status agent-core gpu-transcriber` и `journalctl -u agent-core`.
+Команды с `--user` в старых инструкциях относятся к прежнему развёртыванию.
+Python Core находится в `/home/nvidia/agent-core/.venv/`, но пакет импортируется из
+`/home/nvidia/tg_bot_kirpich/agent-core/` (editable install).
+На AGX системные юниты — `llama-server-ocr` и `handwriting-ocr`.
+
+`scripts/deploy_core.py --stage DIRECTORY` выполняется на Xavier от root.
+Пакет содержит изменяемые Python-файлы по относительным путям и `manifest.json`:
+`files -> relative_path -> {before: SHA256, after: SHA256}`.
+Установщик проверяет исходные и новые файлы, синтаксис, отсутствие выполняемых и ожидающих
+задач; сохраняет исходники в `/home/nvidia/core-releases/`, останавливает Core,
+заменяет перечисленные файлы и проверяет новый запуск и handshake с Gateway.
+При неуспехе возвращает исходники и проверяет подключение старой версии.
+Новые зависимости, секреты, миграции и юниты этим инструментом не обновляются.
+Перед вызовом выполняйте проверку конфигурации через `get_settings().validate_runtime()`
+из рабочего окружения Core. Между проверкой очереди и остановкой остаётся короткое окно
+приёма нового задания: обновляйте во время отсутствия активности пользователя.
+
+## Диагностический отчёт
+
+```sh
+sudo python3 /usr/local/lib/assistant-backup/assistant_health.py \
+  --database /home/nvidia/assistant/core.sqlite3 \
+  --service agent-core --service gpu-transcriber \
+  --endpoint stt=http://127.0.0.1:17493/health \
+  --backup-directory /var/lib/assistant-backups
+```
+
+JSON содержит счётчики и возраст очередей, время последнего завершённого задания,
+состояние и память сервисов, ответы health и возраст локальной копии. Пользовательские тексты
+не читаются и не выводятся. Код возврата 1 означает провал проверки или превышение порогов:
+ожидание задания >15 минут, выполнение >2 часов, доставка >5 минут, копия >36 часов.
+Длительная задача может правомерно превышать порог — это сигнал для проверки, не команда убить её.
+`off_host_verified=false` означает, что этот каталог не содержит подтверждения внешней копии.
+На AGX добавьте `--require-verified-backup`: отсутствие успешного восстановления последнего
+архива будет ошибкой проверки.
+Это проверка по запросу, а не автоматически настроенное оповещение.
+
+После временного отказа GPU Core использует CPU и на следующем запросе спустя 60 секунд
+пробует GPU снова. Перезапуск Core для выхода из CPU fallback больше не нужен.
+
+## Права на архивы и межхостовый ключ
+
+Core и OCR работают как nvidia. На обеих платах этот пользователь не имеет доступа
+к /var/lib/assistant-backups. На AGX ключ находится в /var/lib/assistant-backup-client
+(root, 0700; ключ 0600), инструменты — в /usr/local/lib/assistant-backup (root).
+На Xavier учётная запись assistant-backup имеет только чтение архива через принудительную
+SSH-команду cat /var/lib/assistant-backups/latest.tar, с ограничением адреса 10.0.7.98
+и опцией restrict. Ключ не авторизован для nvidia или root на Xavier.
+
+Эти меры отделяют резервные копии от процессов бота. Они не заменяют разграничение
+пользователей внутри общей базы Core: оно обеспечивается проверками приложения
+и пользовательскими каталогами, покрытыми тестами. Администратор root видит общий архив.
+Проверить внешнюю копию:
+
+```sh
+sudo python3 /usr/local/lib/assistant-backup/assistant_health.py \
+  --backup-directory /var/lib/assistant-backups --require-verified-backup
+```
+
+
+## On-demand OCR and background transcription (2026-09-08)
+
+On 10.0.7.98 set OCR_MANAGE_LLAMA_SERVICE=true and use the same local lock file
+/home/nvidia/.cache/assistant-gpu.lock for OCR_GPU_LOCK_PATH and GPU_STT_GPU_LOCK_PATH.
+Neither worker preloads. Both hold the lock until their model is unloaded.
+OCR starts user llama-server-ocr.service for a job and stops it afterwards, including errors.
+Install deploy/systemd/llama-server-ocr-user.service under
+~/.config/systemd/user/llama-server-ocr.service without enabling it. Disable the old
+system llama-server-ocr unit and remove it from handwriting-ocr Wants/After.
+The nvidia user manager must remain available (lingering is already used for Whisper).
+Do not manually start either model outside the shared lock.
+
+Audio uploads and YouTube work use a separate per-user transcription queue. Text requests
+continue during STT and recording analysis. Final turns in the same assistant conversation
+are serialized with a lock to keep agent and MCP contexts consistent.

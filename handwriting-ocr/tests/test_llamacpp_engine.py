@@ -68,6 +68,7 @@ def test_llamacpp_engine_sends_openai_image_url(tmp_path: Path) -> None:
             llama_url=f"http://127.0.0.1:{server.server_address[1]}",
             model="qwen3-vl-2b",
             request_timeout=5.0,
+            max_passes=3,
         )
         image = tmp_path / "note.jpg"
         image.write_bytes(b"\xff\xd8\xffpretend jpeg")
@@ -78,11 +79,11 @@ def test_llamacpp_engine_sends_openai_image_url(tmp_path: Path) -> None:
         thread.join(timeout=5.0)
 
     assert result["kind"] == "text"
-    assert result["passes"] == 3
+    assert result["passes"] == 1
     assert result["raw_text"] == "купить молоко"
-    assert result["markdown"].startswith("# Список")
+    assert result["markdown"] == "купить молоко"
     posts = [item for item in fake.requests if item[0] == "POST"]
-    assert len(posts) == 3
+    assert len(posts) == 1
     first = posts[0][2]
     assert first is not None
     content = first["messages"][0]["content"]
@@ -179,7 +180,7 @@ def test_llamacpp_ocr_pipeline_is_one_shot(tmp_path: Path) -> None:
     assert first["max_tokens"] == 2048
 
 
-def test_llamacpp_ocr_ensemble_merges_three_preprocessed_views(tmp_path: Path) -> None:
+def test_llamacpp_legacy_three_pass_setting_does_not_repeat_page(tmp_path: Path) -> None:
     fake = _FakeLlama()
     fake.replies = ["цвет", "серый длиннее текст", "тушь"]
     server, thread = _serve(fake)
@@ -202,10 +203,10 @@ def test_llamacpp_ocr_ensemble_merges_three_preprocessed_views(tmp_path: Path) -
         thread.join(timeout=5.0)
 
     assert result["kind"] == "text"
-    assert result["passes"] == 3
-    assert result["raw_text"] == "серый длиннее текст"
+    assert result["passes"] == 1
+    assert result["raw_text"] == "цвет"
     posts = [item for item in fake.requests if item[0] == "POST"]
-    assert len(posts) == 3
+    assert len(posts) == 1
     for post in posts:
         assert post[2] is not None
         types = [part["type"] for part in post[2]["messages"][0]["content"]]
@@ -224,3 +225,18 @@ def test_build_engine_picks_llamacpp() -> None:
     engine = build_engine(settings)
     assert isinstance(engine, LlamaCppEngine)
     assert engine.model_name == "qwen3-vl-2b"
+
+
+def test_managed_service_starts_only_on_load_and_stops_on_unload(monkeypatch):
+    from handwriting_ocr.engine import LlamaCppEngine
+    calls = []
+    engine = LlamaCppEngine(llama_url="http://127.0.0.1:8081", model="ocr", manage_service=True)
+    monkeypatch.setattr(engine, "_service", lambda action: calls.append(action))
+    monkeypatch.setattr(engine, "probe", lambda: True)
+    assert calls == []
+    engine.load()
+    assert calls == ["start"]
+    assert engine.ready
+    engine.unload()
+    assert calls == ["start", "stop"]
+    assert not engine.ready

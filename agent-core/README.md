@@ -35,7 +35,7 @@ agent_core/
 ├── reminders/         buttoned follow-up after a fire (done / snooze / reschedule)
 ├── journal/           evening check-in (work + personal) and the month-end summary
 ├── training/          trainer-journal skill seeded into each user workspace
-├── calendar/          CalendarProvider protocol + local SQLite implementation
+├── calendar/          CalendarProvider + local SQLite and per-user Yandex CalDAV
 ├── rpc/               the outbound link and the Gateway-facing handlers
 └── storage/           SQLite schema, migrations, repositories
 ```
@@ -88,6 +88,13 @@ fetch, no private or loopback addresses — but no provider is wired up, so `web
 `web_fetch` are not registered and the assistant has no network reach through MCP. The guard is
 written and tested ahead of the provider because the policy is the part that is easy to get wrong,
 and loopback on this machine includes the MCP server itself.
+
+**Yandex Calendar can be enabled for one Telegram user.** Set
+`YANDEX_CALENDAR_USER_ID`, `YANDEX_CALENDAR_USERNAME` and
+`YANDEX_CALENDAR_APP_PASSWORD`. The password must be a Yandex ID app password of type
+“Calendar”, not the account password. A bare numeric Telegram id is accepted and normalized to
+`tg:<id>`. Reads cover all calendars in the account; writes go to `YANDEX_CALENDAR_NAME` when set,
+otherwise to the first calendar returned by CalDAV. Other Telegram users continue using SQLite.
 
 **Reminders do not depend on Cursor.** The scheduler reads SQLite and emits events; a reminder fires
 whether or not Cursor is running and whether or not the Gateway is reachable. If the Gateway is away,

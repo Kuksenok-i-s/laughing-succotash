@@ -149,6 +149,10 @@ class JobStore:
         with self._lock:
             return sum(1 for job in self._jobs.values() if job.status == "queued")
 
+    def running_count(self) -> int:
+        with self._lock:
+            return sum(1 for job in self._jobs.values() if job.status == "running")
+
     def sweep(self, now: float | None = None) -> int:
         moment = time.time() if now is None else now
         with self._lock:

@@ -99,6 +99,7 @@ class GpuServiceSTT(SpeechToText):
         *,
         on_progress: ProgressHook | None = None,
         on_notice: NoticeHook | None = None,
+        language: str | None = None,
     ) -> TranscriptionResult:
         if not audio_path.exists():
             raise SttError(f"audio file not found: {audio_path.name}")
@@ -108,11 +109,13 @@ class GpuServiceSTT(SpeechToText):
         if not self._ready:
             await self.warmup()
 
+        job_language = self._language if language is None else language
+
         async with self._slots:
             started = time.monotonic()
             job_id = new_ulid()
             try:
-                await self._submit(job_id, audio_path)
+                await self._submit(job_id, audio_path, language=job_language)
                 await self._await_completion(job_id, on_progress)
                 payload = await self._request("GET", f"/v1/jobs/{job_id}/result")
             finally:
@@ -133,9 +136,9 @@ class GpuServiceSTT(SpeechToText):
 
     # ---- steps -----------------------------------------------------------
 
-    async def _submit(self, job_id: str, audio_path: Path) -> None:
+    async def _submit(self, job_id: str, audio_path: Path, *, language: str) -> None:
         query = {
-            "language": self._language,
+            "language": language,
             "beam_size": str(self._beam_size),
             "filename": audio_path.name,
         }

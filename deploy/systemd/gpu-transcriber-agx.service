@@ -1,0 +1,40 @@
+[Unit]
+# User unit for faster-whisper on the OCR Jetson (10.0.7.98). Same CTranslate2
+# CUDA 11.4 / sm_72 build as Xavier. Binds the LAN so Core can send 10-minute
+# chunks here when handwriting-ocr is idle.
+Description=Transcription service (faster-whisper large-v3, CUDA float16)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nvidia/tg_bot_kirpich
+EnvironmentFile=/home/nvidia/.config/gpu-transcriber/service.env
+Environment=PYTHONPATH=/home/nvidia/tg_bot_kirpich/gpu-transcriber
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/nvidia/.local/bin:/home/nvidia/.assistant/venv-whisper/bin:/usr/bin:/bin
+Environment=LD_LIBRARY_PATH=/home/nvidia/.local/opt/ctranslate2/lib:/home/nvidia/.local/opt/cudnn/lib:/usr/local/cuda/lib64:/usr/local/cuda/targets/aarch64-linux/lib
+Environment=TMPDIR=/home/nvidia/.gpu-transcriber/tmp
+Environment=TEMP=/home/nvidia/.gpu-transcriber/tmp
+Environment=TMP=/home/nvidia/.gpu-transcriber/tmp
+ExecStart=/home/nvidia/.assistant/venv-whisper/bin/python -m gpu_transcriber.main
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+MemoryAccounting=yes
+MemoryMax=6G
+MemorySwapMax=0
+OOMPolicy=kill
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpu-transcriber
+
+[Install]
+WantedBy=default.target

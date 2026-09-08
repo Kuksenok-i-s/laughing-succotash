@@ -9,7 +9,8 @@ import re
 
 from pathlib import Path
 
-from ..stt.base import TranscriptionResult
+from ..stt.base import TranscriptionResult, _clock
+from .urls import extract_youtube_url
 
 _CONTROL = re.compile(r"[\x00-\x1f]")
 _FILENAME_UNSAFE = re.compile(r'[\\/:*?"<>|]')
@@ -101,20 +102,53 @@ def format_duration(seconds: float | None) -> str | None:
     return f"{max(minutes, 1)} мин"
 
 
+def timestamp_link(url: str, seconds: float) -> str:
+    canonical = extract_youtube_url(url)
+    label = _clock(max(0, seconds))
+    if canonical is None:
+        return f"[{label}]"
+    return f"[{label}]({canonical}&t={max(0, int(seconds))}s)"
+
+
+def topic_contents(url: str, transcription: TranscriptionResult,
+                   topics: dict[int, str]) -> str:
+    return "\n".join(
+        f"- {timestamp_link(url, transcription.segments[index].start)} — {_heading(title)}"
+        for index, title in sorted(topics.items())
+        if 0 <= index < len(transcription.segments)
+    )
+
+
+def _heading(text: str) -> str:
+    return re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", " ".join(text.split()))
+
+
 def transcript_markdown(
     *,
     title: str,
     url: str,
     transcription: TranscriptionResult,
+    topics: dict[int, str] | None = None,
 ) -> str:
-    body = transcription.with_timestamps() or transcription.text
+    topics = topics or {}
+    paragraphs = []
+    for index, segment in enumerate(transcription.segments):
+        if index in topics:
+            paragraphs.append(f"### {timestamp_link(url, segment.start)} — {_heading(topics[index])}")
+        paragraphs.append(f"{timestamp_link(url, segment.start)} {segment.text}")
+    body = "\n\n".join(paragraphs) or transcription.text
+    contents = topic_contents(url, transcription, topics)
+    if contents:
+        body = "## Темы\n\n" + contents + "\n\n## Транскрипт\n\n" + body
+    else:
+        body = "## Транскрипт\n\n" + body
     lines = [f"# {readable_title(title)}", "", f"Источник: {url}"]
     duration = format_duration(transcription.duration)
     if duration:
         lines.append(f"Длительность: {duration}")
     if transcription.language:
         lines.append(f"Язык: {transcription.language}")
-    lines.extend(["", "## Транскрипт", "", body.strip(), ""])
+    lines.extend(["", body.strip(), ""])
     return "\n".join(lines)
 
 

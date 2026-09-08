@@ -13,7 +13,7 @@ import sys
 import threading
 
 from .config import Settings, from_env
-from .engine import WhisperEngine
+from .process_engine import ProcessWhisperEngine
 from .jobs import JobStore
 from .logging_setup import configure_logging
 from .server import TranscriptionApp, TranscriptionServer
@@ -26,7 +26,7 @@ class Service:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._store = JobStore(settings.work_dir, ttl_seconds=settings.job_ttl_seconds)
-        self._engine = WhisperEngine(
+        self._engine = ProcessWhisperEngine(
             model=settings.model,
             device=settings.device,
             compute_type=settings.compute_type,
@@ -38,6 +38,9 @@ class Service:
             self._store,
             self._engine,
             idle_unload_seconds=settings.idle_unload_seconds,
+            gpu_lock_path=settings.gpu_lock_path,
+            chunk_seconds=settings.chunk_seconds,
+            chunk_overlap_seconds=settings.chunk_overlap_seconds,
         )
         self._server: TranscriptionServer | None = None
         self._threads: list[threading.Thread] = []

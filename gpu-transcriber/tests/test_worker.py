@@ -168,3 +168,22 @@ def test_the_worker_drains_the_queue_until_told_to_stop(
 
     assert engine.loads == 1
     assert len(engine.calls) == 2
+
+
+def test_shared_gpu_does_not_preload_and_unloads_after_job(store, engine, tmp_path):
+    from gpu_transcriber.gpu_lock import gpu_slot
+    worker = TranscriptionWorker(store, engine, gpu_lock_path=str(tmp_path / "gpu.lock"), poll_interval=0.01)
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.run, args=(stop,))
+    with gpu_slot(str(tmp_path / "gpu.lock")):
+        thread.start()
+        _queued(store)
+        stop.wait(0.05)
+        assert not engine.ready
+    try:
+        assert wait_for(lambda: store.get("01JOB").status == "done")
+        assert wait_for(lambda: not engine.ready)
+    finally:
+        stop.set()
+        thread.join(2)
+    assert not thread.is_alive()

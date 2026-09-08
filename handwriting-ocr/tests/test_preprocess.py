@@ -81,3 +81,72 @@ def test_prepare_ink_inverts_a_dark_page(tmp_path: Path) -> None:
     assert mime == "image/png"
     ink = Image.open(BytesIO(payload))
     assert ink.getextrema()[1] > 200
+
+
+def test_rectifies_perspective_page_before_fitting(tmp_path):
+    from handwriting_ocr.preprocess import prepare_document
+    image = Image.new("RGB", (1000, 800), (45, 40, 35))
+    draw = ImageDraw.Draw(image)
+    draw.polygon([(220, 100), (820, 170), (760, 710), (140, 650)], fill="white")
+    draw.line([(300, 300), (680, 340)], fill="black", width=6)
+    page = prepare_document(image)
+    assert 590 < page.width < 660
+    assert 520 < page.height < 590
+    assert page.getpixel((page.width//2, 30))[0] > 240
+    assert page.convert("L").getextrema()[0] < 30
+    src = tmp_path / "document.png"
+    image.save(src)
+    payload, _ = prepare_triage_bytes(src, max_edge=512)
+    assert max(Image.open(BytesIO(payload)).size) == 512
+
+
+def test_exif_orientation_is_applied(tmp_path):
+    src = tmp_path / "rotated.jpg"
+    image = Image.new("RGB", (800, 400), "white")
+    exif = image.getexif()
+    exif[274] = 6
+    image.save(src, exif=exif)
+    payload, _ = prepare_triage_bytes(src, max_edge=512)
+    assert Image.open(BytesIO(payload)).size == (256, 512)
+
+
+def test_full_frame_and_ambiguous_images_are_not_cropped():
+    from handwriting_ocr.preprocess import prepare_document
+    for color in ["white", "black", "red"]:
+        image = Image.new("RGB", (800, 600), color)
+        assert prepare_document(image).size == image.size
+    image = Image.new("RGB", (800, 600), "black")
+    ImageDraw.Draw(image).rectangle((0, 0, 700, 550), fill="white")
+    assert prepare_document(image).size == image.size
+
+
+def test_region_enhancement_removes_blank_margins_without_losing_ink():
+    from handwriting_ocr.preprocess import enhance_region
+    image = Image.new("RGB", (900, 90), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((30, 30, 260, 40), fill=(130, 130, 130))
+    enhanced = enhance_region(image, max_edge=1024)
+    assert enhanced.size == (765, 105)
+    assert enhanced.getextrema() == (0, 255)
+    assert enhanced.getpixel((0, 0)) == 255
+
+
+def test_region_enhancement_respects_cap_and_does_not_threshold():
+    from handwriting_ocr.preprocess import enhance_region
+    image = Image.new("RGB", (800, 300), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 40, 700, 80), fill=(100, 100, 100))
+    draw.rectangle((40, 100, 700, 140), fill=(170, 170, 170))
+    enhanced = enhance_region(image, max_edge=512)
+    assert max(enhanced.size) <= 512
+    assert len(enhanced.getcolors(maxcolors=256)) > 2
+
+
+def test_region_enhancement_leaves_dark_and_flat_fragments_alone():
+    from handwriting_ocr.preprocess import enhance_region
+    for color in ["white", "black", (230, 230, 230)]:
+        image = Image.new("RGB", (100, 50), color)
+        assert enhance_region(image, max_edge=512).tobytes() == image.tobytes()
+    image = Image.new("RGB", (100, 50), "black")
+    ImageDraw.Draw(image).rectangle((20, 20, 80, 30), fill="white")
+    assert enhance_region(image, max_edge=512).tobytes() == image.tobytes()

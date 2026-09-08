@@ -1,6 +1,6 @@
 """The single thread that owns the GPU / Ollama slot.
 
-One job at a time: two Qwen3-VL passes already occupy the card. The model is loaded here rather
+One job at a time: a page pass and optional fragment retry share the card. The model is loaded here rather
 than at HTTP bind so ``/health`` answers while weights are still coming in. After a stretch of
 idle time the weights are dropped so Whisper can use the same card.
 """
@@ -13,6 +13,7 @@ import time
 from functools import partial
 
 from .engine import Engine
+from .gpu_lock import gpu_slot
 from .jobs import JobStore
 
 log = logging.getLogger(__name__)
@@ -25,8 +26,10 @@ class OcrWorker:
         engine: Engine,
         *,
         poll_interval: float = 0.5,
-        idle_unload_seconds: float = 600.0,
+        gpu_lock_path: str = "",
+        idle_unload_seconds: float = 3600.0,
     ) -> None:
+        self._gpu_lock_path = gpu_lock_path
         self._store = store
         self._engine = engine
         self._poll = poll_interval
@@ -34,15 +37,6 @@ class OcrWorker:
         self._last_used = time.monotonic()
 
     def run(self, stop: threading.Event) -> None:
-        # Best-effort preload so the first photo is faster. Failure here must not kill the
-        # worker: recognize() loads lazily when a job arrives (including after unload).
-        if not self._engine.ready:
-            try:
-                self._engine.load()
-                self._last_used = time.monotonic()
-            except Exception:
-                log.exception("could not preload the OCR model; will retry on the first job")
-
         while not stop.is_set():
             job = self._store.next_pending(self._poll)
             if job is not None:
@@ -52,6 +46,14 @@ class OcrWorker:
             self._maybe_unload()
 
     def run_job(self, job_id: str) -> None:
+        with gpu_slot(self._gpu_lock_path):
+            try:
+                self._run_owned_job(job_id)
+            finally:
+                if self._gpu_lock_path:
+                    self._engine.unload()
+
+    def _run_owned_job(self, job_id: str) -> None:
         job = self._store.get(job_id)
         if job is None:
             return

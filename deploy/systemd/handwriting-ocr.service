@@ -32,6 +32,11 @@ NoNewPrivileges=true
 RestrictSUIDSGID=true
 LockPersonality=true
 
+MemoryAccounting=yes
+MemoryMax=1G
+MemorySwapMax=0
+OOMPolicy=kill
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=handwriting-ocr

@@ -68,6 +68,11 @@ class SessionManager:
                 conversation_id, str(target)
             )
 
+            if record is not None and record.backend != self._backend.name:
+                # External session IDs cannot be resumed across different agent providers.
+                await self._conversations.close_session(record.session_id)
+                record = None
+
             if record is None:
                 stale = await self._conversations.session_for_conversation(conversation_id)
                 if stale is not None and stale.workspace != str(target):
@@ -84,7 +89,7 @@ class SessionManager:
                 token = self._token_for(conversation_id)
                 resumed = await self._resume(record, target, token)
                 if resumed:
-                    await self._apply_chat_mode(record.external_id)
+                    await self._protect_session(record)
                     return record, False
                 log.info(
                     "cursor session %s could not be resumed; starting a new one",
@@ -93,8 +98,17 @@ class SessionManager:
                 await self._conversations.close_session(record.session_id)
 
             created = await self._create(conversation_id, target)
-            await self._apply_chat_mode(created.external_id)
+            await self._protect_session(created)
             return created, True
+
+    async def _protect_session(self, record: CursorSession) -> None:
+        try:
+            await self._apply_chat_mode(record.external_id)
+        except AgentError:
+            # A failed new session has never received its initial instructions. Do not resume
+            # it later as an already initialized conversation after the backend recovers.
+            await self._conversations.close_session(record.session_id)
+            raise
 
     async def _apply_chat_mode(self, session_id: str) -> None:
         """Telegram chat sessions run in plan mode so built-in shell/write stay blocked.
@@ -104,11 +118,11 @@ class SessionManager:
         """
         set_mode = getattr(self._backend, "set_mode", None)
         if set_mode is None or not session_id:
-            return
+            raise AgentError("Cannot establish protected chat mode")
         try:
             await set_mode(session_id, "plan")
         except AgentError as exc:
-            log.warning("could not set plan mode on session %s: %s", session_id, exc)
+            raise AgentError("Cannot establish protected chat mode") from exc
 
     async def _resume(self, record: CursorSession, workspace: Path, token: str) -> bool:
         resume = getattr(self._backend, "resume_session", None)

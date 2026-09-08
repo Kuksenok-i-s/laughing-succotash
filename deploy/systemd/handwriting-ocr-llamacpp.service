@@ -2,8 +2,8 @@
 # System unit for handwriting OCR on the llama.cpp host (10.0.7.98).
 # Talks to local llama-server VL on 127.0.0.1:8081. The job API is on the LAN.
 Description=Handwriting OCR service (Qwen3-VL via llama.cpp)
-After=network-online.target llama-server-ocr.service
-Wants=network-online.target llama-server-ocr.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -26,6 +26,11 @@ RestartSec=5
 NoNewPrivileges=true
 RestrictSUIDSGID=true
 LockPersonality=true
+
+MemoryAccounting=yes
+MemoryMax=1G
+MemorySwapMax=0
+OOMPolicy=kill
 
 StandardOutput=journal
 StandardError=journal

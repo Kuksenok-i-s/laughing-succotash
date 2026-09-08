@@ -37,6 +37,8 @@ def test_the_environment_overrides_every_default(tmp_path: Path) -> None:
             "GPU_STT_MAX_UPLOAD_MB": "64",
             "GPU_STT_JOB_TTL_SECONDS": "120",
             "GPU_STT_IDLE_UNLOAD_SECONDS": "90",
+            "GPU_STT_CHUNK_SECONDS": "300",
+            "GPU_STT_CHUNK_OVERLAP_SECONDS": "1.5",
         }
     )
 
@@ -49,6 +51,8 @@ def test_the_environment_overrides_every_default(tmp_path: Path) -> None:
     assert settings.max_upload_bytes == 64 * 1024 * 1024
     assert settings.job_ttl_seconds == 120.0
     assert settings.idle_unload_seconds == 90.0
+    assert settings.chunk_seconds == 300.0
+    assert settings.chunk_overlap_seconds == 1.5
 
 
 def test_a_blank_value_falls_back_to_the_default() -> None:

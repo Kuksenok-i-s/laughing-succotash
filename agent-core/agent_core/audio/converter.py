@@ -47,6 +47,37 @@ async def probe_duration(path: Path) -> float | None:
         return None
 
 
+async def extract_slice(source: Path, target: Path, start: float, length: float) -> Path:
+    """Cut ``length`` seconds from ``start`` as 16 kHz mono WAV."""
+    if shutil.which("ffmpeg") is None:
+        raise AudioProbeError("ffmpeg is not installed")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-ss",
+        f"{start:.3f}",
+        "-t",
+        f"{length:.3f}",
+        "-i",
+        str(source),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(target),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await process.communicate()
+    if process.returncode != 0 or not target.exists() or target.stat().st_size == 0:
+        raise AudioProbeError(f"ffmpeg failed: {stderr.decode()[-300:]}")
+    return target
+
+
 async def to_wav16k(source: Path, target: Path) -> Path:
     """Transcode to 16 kHz mono WAV — whisper's native input format.
 

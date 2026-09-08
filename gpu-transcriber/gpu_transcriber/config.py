@@ -39,7 +39,11 @@ class Settings:
     job_ttl_seconds: float = 6 * 3600.0
     sweep_interval_seconds: float = 60.0
     # Drop weights after this much quiet so OCR can use the same card. 0 disables.
+    gpu_lock_path: str = ""
     idle_unload_seconds: float = 600.0
+    # Long recordings are split so CUDA working set stays inside MemoryMax. 0 disables.
+    chunk_seconds: float = 600.0
+    chunk_overlap_seconds: float = 2.0
     max_upload_mb: int = 512
     upload_chunk_size: int = 1024 * 1024
 
@@ -100,8 +104,13 @@ def from_env(env: Mapping[str, str] | None = None) -> Settings:
         sweep_interval_seconds=seconds(
             "SWEEP_INTERVAL_SECONDS", defaults.sweep_interval_seconds
         ),
+        gpu_lock_path=text("GPU_LOCK_PATH", defaults.gpu_lock_path),
         idle_unload_seconds=seconds(
             "IDLE_UNLOAD_SECONDS", defaults.idle_unload_seconds
+        ),
+        chunk_seconds=seconds("CHUNK_SECONDS", defaults.chunk_seconds),
+        chunk_overlap_seconds=seconds(
+            "CHUNK_OVERLAP_SECONDS", defaults.chunk_overlap_seconds
         ),
         max_upload_mb=number("MAX_UPLOAD_MB", defaults.max_upload_mb),
         upload_chunk_size=number("UPLOAD_CHUNK_SIZE", defaults.upload_chunk_size),

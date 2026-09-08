@@ -63,3 +63,31 @@ def test_idle_unload_drops_weights_and_the_next_job_reloads(store, engine: FakeE
     assert engine.loads == 2
     assert engine.unloads >= 1
     assert store.get("01TWO").result["kind"] == "text"
+
+
+def test_no_preload_without_an_ocr_request(store, engine):
+    stop = threading.Event()
+    worker = OcrWorker(store, engine, poll_interval=0.01)
+    thread = threading.Thread(target=worker.run, args=(stop,))
+    thread.start()
+    stop.wait(0.05)
+    stop.set()
+    thread.join(1)
+    assert engine.loads == 0
+
+
+def test_shared_gpu_unloads_before_releasing_lock(store, engine, tmp_path):
+    from handwriting_ocr.gpu_lock import gpu_slot
+    _queued(store, tmp_path)
+    worker = OcrWorker(store, engine, gpu_lock_path=str(tmp_path / "gpu.lock"))
+    with gpu_slot(str(tmp_path / "gpu.lock")):
+        thread = threading.Thread(target=worker.run_job, args=("01W",))
+        thread.start()
+        assert not threading.Event().wait(0.05)
+        assert engine.loads == 0
+    thread.join(2)
+    assert not thread.is_alive()
+    assert store.get("01W").status == "done"
+    assert engine.loads == 1
+    assert engine.unloads == 1
+    assert not engine.ready

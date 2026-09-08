@@ -20,6 +20,7 @@ def test_health_needs_no_token_and_admits_a_cold_model(client: Client) -> None:
     assert response.payload["model"] == "fake-qwen3-vl"
     assert response.payload["model_loaded"] is False
     assert response.payload["queued"] == 0
+    assert response.payload["running"] == 0
 
 
 def test_everything_else_requires_the_token(client: Client) -> None:

@@ -32,11 +32,12 @@ def test_from_env_reads_ocr_prefix() -> None:
     assert settings.validate_runtime() == []
 
 
-def test_defaults_idle_unload_is_ten_minutes() -> None:
+def test_defaults_idle_unload_is_one_hour() -> None:
     settings = from_env({"OCR_TOKEN": "t" * 40})
     assert settings.host == "127.0.0.1"
-    assert settings.keep_alive == "10m"
-    assert settings.idle_unload_seconds == 600.0
+    assert settings.keep_alive == "1h"
+    assert settings.idle_unload_seconds == 3600.0
+    assert settings.max_passes == 2
 
 
 def test_a_blank_host_falls_back_to_loopback() -> None:

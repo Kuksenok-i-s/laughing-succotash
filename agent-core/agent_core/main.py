@@ -19,6 +19,8 @@ from .assistant.sessions import SessionManager
 from .assistant.transcript import TranscriptAnalyzer
 from .audio.storage import UploadManager
 from .calendar.local import LocalCalendarProvider
+from .calendar.routed import RoutedCalendarProvider
+from .calendar.yandex import YandexCalendarProvider
 from .config import Settings, get_settings
 from .files import FileDelivery
 from .journal import JournalService
@@ -183,10 +185,24 @@ class Core:
         assistant.journal = journal
         self._journal = journal
 
+        calendar_provider = LocalCalendarProvider(repos.calendar)
+        if self._settings.yandex_calendar_user_id:
+            calendar_provider = RoutedCalendarProvider(
+                routed_user_id=self._settings.yandex_calendar_user_id,
+                routed=YandexCalendarProvider(
+                    user_id=self._settings.yandex_calendar_user_id,
+                    username=self._settings.yandex_calendar_username,
+                    app_password=self._settings.yandex_calendar_app_password,
+                    calendar_name=self._settings.yandex_calendar_name,
+                    url=self._settings.yandex_calendar_url,
+                ),
+                fallback=calendar_provider,
+            )
+
         register_tools(
             registry,
             repos,
-            calendar_provider=LocalCalendarProvider(repos.calendar),
+            calendar_provider=calendar_provider,
             scheduler=self._scheduler,
             # No search provider is configured, so web_search and web_fetch are not registered and
             # the assistant has no network reach through MCP at all. See agent_core/search/base.py
@@ -227,11 +243,20 @@ class Core:
 
     def _build_backend(self):
         from .agent.cursor_acp import CursorACPBackend
+        from .agent.codex_acp import CodexACPBackend
 
+        if self._settings.agent_backend == "codex-acp":
+            return CodexACPBackend(
+                self._settings.codex_acp_binary,
+                default_workspace=self._settings.resolved_assistant_workspace,
+                model=self._settings.codex_model,
+                startup_timeout=self._settings.agent_startup_timeout,
+                prompt_timeout=self._settings.agent_prompt_timeout,
+            )
         if self._settings.agent_backend != "acp":
             raise SystemExit(
                 f"unsupported AGENT_BACKEND {self._settings.agent_backend!r}; "
-                "only 'acp' is implemented"
+                "expected 'acp' or 'codex-acp'"
             )
         return CursorACPBackend(
             self._settings.cursor_agent_binary,
@@ -256,15 +281,12 @@ class Core:
             download_root=self._settings.resolved_data_dir / "models",
         )
 
-    def _build_stt(self):
-        if self._settings.stt_backend != "gpu":
-            return self._local_stt()
-
+    def _gpu_stt(self, url: str, token: str):
         from .stt.gpu_service import GpuServiceSTT
 
-        gpu = GpuServiceSTT(
-            base_url=self._settings.stt_gpu_url,
-            token=self._settings.stt_gpu_token,
+        return GpuServiceSTT(
+            base_url=url,
+            token=token,
             language=self._settings.stt_language,
             beam_size=self._settings.stt_beam_size,
             poll_interval=self._settings.stt_gpu_poll_interval,
@@ -272,6 +294,29 @@ class Core:
             upload_timeout=self._settings.stt_gpu_upload_timeout,
             max_concurrent=self._settings.stt_max_concurrent,
         )
+
+    def _build_stt(self):
+        if self._settings.stt_backend != "gpu":
+            return self._local_stt()
+
+        gpu = self._gpu_stt(self._settings.stt_gpu_url, self._settings.stt_gpu_token)
+        secondary_url = self._settings.stt_gpu_secondary_url.strip()
+        if secondary_url:
+            from .stt.dual import DualHostSTT
+
+            gpu = DualHostSTT(
+                primary=gpu,
+                secondary=self._gpu_stt(
+                    secondary_url,
+                    self._settings.stt_gpu_secondary_token or self._settings.stt_gpu_token,
+                ),
+                ocr_health_url=(
+                    self._settings.ocr_service_url if self._settings.ocr_enabled else ""
+                ),
+                chunk_seconds=self._settings.stt_chunk_seconds,
+                overlap_seconds=self._settings.stt_chunk_overlap_seconds,
+                temp_dir=self._settings.resolved_temp_dir,
+            )
         if not self._settings.stt_cpu_fallback:
             return gpu
 

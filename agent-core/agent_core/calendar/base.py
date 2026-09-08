@@ -1,8 +1,8 @@
 """The calendar contract the MCP tools are written against.
 
-The tool schemas must not depend on where events actually live. Today the only implementation is
-SQLite; swapping in EventKit or CalDAV on the Mac mini should require no change to the tools, the
-permission tiers or the confirmation prompts.
+The tool schemas must not depend on where events actually live. Implementations currently include
+local SQLite and Yandex CalDAV; routing between them requires no change to the tools, permission
+tiers or confirmation prompts.
 """
 
 from __future__ import annotations

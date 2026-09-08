@@ -1,7 +1,7 @@
 """Service configuration.
 
 Environment only, and a plain dataclass rather than pydantic-settings. The HTTP surface is
-standard library; the only external dependency is the Ollama HTTP API on localhost.
+standard library; image preprocessing uses Pillow and OpenCV.
 """
 
 from __future__ import annotations
@@ -27,22 +27,24 @@ class Settings:
     # ollama = /api/chat on OCR_OLLAMA_URL; llamacpp = OpenAI /v1 on OCR_LLAMA_URL.
     backend: str = "ollama"
     ollama_url: str = "http://127.0.0.1:11434"
+    manage_llama_service: bool = False
     llama_url: str = "http://127.0.0.1:8081"
     model: str = "qwen3-vl:2b"
-    keep_alive: str = "10m"
+    keep_alive: str = "1h"
     request_timeout: float = 600.0
     max_tokens: int = 2048
     # Long-edge cap in pixels for every image sent to the VL model.
     image_max_edge: int = 512
-    # 3 = triage + correct + markdown. 1 = triage only (safer on 14GB AGX).
-    max_passes: int = 3
+    # 1 = page only; >=2 = page plus at most one localized uncertainty retry.
+    max_passes: int = 2
     # triage = Qwen-style kind JSON. ocr = one-shot document prompt (OvisOCR2 / GLM-OCR).
     pipeline: str = "triage"
 
     work_dir: Path = Path("~/.handwriting-ocr").expanduser()
     job_ttl_seconds: float = 6 * 3600.0
     sweep_interval_seconds: float = 60.0
-    idle_unload_seconds: float = 600.0
+    gpu_lock_path: str = ""
+    idle_unload_seconds: float = 3600.0
     max_upload_mb: int = 32
     upload_chunk_size: int = 1024 * 1024
 
@@ -65,6 +67,8 @@ class Settings:
             problems.append(f"{ENV_PREFIX}BACKEND must be ollama or llamacpp")
         if self.pipeline not in {"triage", "ocr"}:
             problems.append(f"{ENV_PREFIX}PIPELINE must be triage or ocr")
+        if self.manage_llama_service and (self.backend != "llamacpp" or not self.gpu_lock_path):
+            problems.append("managed llama service requires llamacpp and OCR_GPU_LOCK_PATH")
         return problems
 
 
@@ -93,6 +97,7 @@ def from_env(env: Mapping[str, str] | None = None) -> Settings:
         token=text("TOKEN", defaults.token),
         backend=text("BACKEND", defaults.backend).strip().lower(),
         ollama_url=text("OLLAMA_URL", defaults.ollama_url).rstrip("/"),
+        manage_llama_service=text("MANAGE_LLAMA_SERVICE", "false").lower() in {"true", "1", "yes"},
         llama_url=text("LLAMA_URL", defaults.llama_url).rstrip("/"),
         model=text("MODEL", defaults.model),
         keep_alive=text("OLLAMA_KEEP_ALIVE", defaults.keep_alive),
@@ -108,6 +113,7 @@ def from_env(env: Mapping[str, str] | None = None) -> Settings:
         sweep_interval_seconds=seconds(
             "SWEEP_INTERVAL_SECONDS", defaults.sweep_interval_seconds
         ),
+        gpu_lock_path=text("GPU_LOCK_PATH", defaults.gpu_lock_path),
         idle_unload_seconds=seconds(
             "IDLE_UNLOAD_SECONDS", defaults.idle_unload_seconds
         ),

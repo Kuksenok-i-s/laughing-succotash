@@ -58,7 +58,9 @@ class AcpClient:
         env: dict[str, str] | None = None,
         request_timeout: float = 1800.0,
         model: str | None = None,
+        argv: list[str] | None = None,
     ) -> None:
+        self._argv = argv
         self._binary = binary
         self._cwd = cwd
         self._env = env
@@ -102,7 +104,7 @@ class AcpClient:
         if self._env:
             env.update(self._env)
 
-        argv = acp_argv(self._binary, self._model)
+        argv = self._argv if self._argv is not None else acp_argv(self._binary, self._model)
         if self._model:
             log.info("starting acp pinned to %s", self._model)
         try:

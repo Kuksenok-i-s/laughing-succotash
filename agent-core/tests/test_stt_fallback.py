@@ -159,3 +159,51 @@ def test_stt_backend_rejects_unknown_values() -> None:
             allowed_users=["tg:1"],
             stt_backend="tpu",
         )
+
+
+@pytest.mark.asyncio
+async def test_gpu_recovers_after_cooldown_without_restart(tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr('agent_core.stt.fallback.time.monotonic', lambda: now[0])
+    gpu = FakeSTT('gpu', fail_transcribe=True)
+    cpu = FakeSTT('cpu')
+    stt = FallbackSTT(primary=gpu, fallback=cpu, retry_seconds=60)
+    await stt.warmup()
+    assert (await stt.transcribe(tmp_path / 'a')).text == 'cpu'
+    gpu.fail_transcribe = False
+    now[0] = 159
+    assert (await stt.transcribe(tmp_path / 'b')).text == 'cpu'
+    now[0] = 160
+    notices = []
+    assert (await stt.transcribe(tmp_path / 'c', on_notice=notices.append)).text == 'gpu'
+    assert notices == []
+    assert stt.model_name == 'gpu'
+    assert not cpu.ready
+
+
+@pytest.mark.asyncio
+async def test_failed_probe_preserves_cpu_and_waits_before_retry(tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr('agent_core.stt.fallback.time.monotonic', lambda: now[0])
+    gpu = FakeSTT('gpu', fail_warmup=True)
+    cpu = FakeSTT('cpu')
+    stt = FallbackSTT(primary=gpu, fallback=cpu, retry_seconds=60)
+    await stt.warmup()
+    now[0] = 160
+    assert (await stt.transcribe(tmp_path / 'a')).text == 'cpu'
+    assert gpu.warmups == 2
+    now[0] = 161
+    assert (await stt.transcribe(tmp_path / 'b')).text == 'cpu'
+    assert gpu.warmups == 2
+
+
+@pytest.mark.asyncio
+async def test_successful_probe_but_failed_inference_returns_to_cpu(tmp_path):
+    gpu = FakeSTT('gpu', fail_transcribe=True)
+    cpu = FakeSTT('cpu')
+    stt = FallbackSTT(primary=gpu, fallback=cpu, retry_seconds=0)
+    await stt.warmup()
+    await stt.transcribe(tmp_path / 'a')
+    assert (await stt.transcribe(tmp_path / 'b')).text == 'cpu'
+    assert stt.model_name == 'fallback/cpu'
+    assert len(gpu.calls) == 2

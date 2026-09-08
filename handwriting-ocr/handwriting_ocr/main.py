@@ -19,6 +19,7 @@ def build_engine(settings: Settings) -> Engine:
     if settings.backend == "llamacpp":
         return LlamaCppEngine(
             llama_url=settings.llama_url,
+            manage_service=settings.manage_llama_service,
             model=settings.model,
             request_timeout=settings.request_timeout,
             max_tokens=settings.max_tokens,
@@ -49,6 +50,7 @@ class Service:
             self._store,
             self._engine,
             idle_unload_seconds=settings.idle_unload_seconds,
+            gpu_lock_path=settings.gpu_lock_path,
         )
         self._server: OcrServer | None = None
         self._threads: list[threading.Thread] = []

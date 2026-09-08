@@ -199,7 +199,8 @@ class RemoteOcrService(HandwritingOCR):
             raise
         except (TimeoutError, aiohttp.ClientError) as exc:
             self._ready = False
-            raise OcrError(f"OCR service {method} {path} failed: {exc}") from exc
+            detail = str(exc).strip() or type(exc).__name__
+            raise OcrError(f"OCR service {method} {path} failed: {detail}") from exc
 
 
 def _to_result(payload: dict[str, Any]) -> OcrResult:

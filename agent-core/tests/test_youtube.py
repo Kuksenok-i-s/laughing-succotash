@@ -155,7 +155,7 @@ def test_transcript_markdown_includes_clocks_and_source() -> None:
     )
     assert body.startswith("# Me at the zoo")
     assert "Источник: https://www.youtube.com/watch?v=jNQXAC9IVRw" in body
-    assert "[0:00] hello zoo" in body
+    assert "[0:00](https://www.youtube.com/watch?v=jNQXAC9IVRw&t=0s) hello zoo" in body
 
 
 def test_downloader_refuses_tmp_on_the_proxy() -> None:

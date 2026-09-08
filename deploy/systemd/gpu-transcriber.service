@@ -44,6 +44,11 @@ LockPersonality=true
 # work directory all live under $HOME.
 # No MemoryDenyWriteExecute: CPython needs executable mappings.
 
+MemoryAccounting=yes
+MemoryMax=6G
+MemorySwapMax=0
+OOMPolicy=kill
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=gpu-transcriber

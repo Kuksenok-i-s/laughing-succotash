@@ -90,6 +90,14 @@ class CursorACPBackend:
         # anyway, so a single map is enough to correlate a permission request with its turn.
         self._permission_context: dict[str, AgentContext] = {}
 
+    def _make_client(self) -> AcpClient:
+        return AcpClient(
+            self._binary,
+            cwd=self._default_workspace,
+            request_timeout=self._prompt_timeout,
+            model=self._model,
+        )
+
     @property
     def name(self) -> str:
         return "acp"
@@ -105,12 +113,7 @@ class CursorACPBackend:
             if self._client is not None and self._client.running:
                 return
             self._state = "starting"
-            client = AcpClient(
-                self._binary,
-                cwd=self._default_workspace,
-                request_timeout=self._prompt_timeout,
-                model=self._model,
-            )
+            client = self._make_client()
             client.on_update = self._on_update
             client.on_permission = self._on_permission
             client.on_create_plan = self._on_create_plan

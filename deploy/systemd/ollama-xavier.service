@@ -1,0 +1,31 @@
+[Unit]
+# System unit for Ollama on Jetson Xavier (JetPack 5 CUDA backend).
+# Binary and libs live under ~/.local/opt/ollama.
+Description=Ollama (Qwen3-VL for handwriting OCR)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nvidia
+Group=nvidia
+Environment=OLLAMA_HOST=127.0.0.1:11434
+Environment=OLLAMA_MODELS=/home/nvidia/.ollama/models
+Environment=HOME=/home/nvidia
+Environment=PATH=/home/nvidia/.local/bin:/home/nvidia/.local/opt/ollama/bin:/usr/bin:/bin
+Environment=LD_LIBRARY_PATH=/home/nvidia/.local/opt/ollama/lib/ollama/cuda_jetpack5:/home/nvidia/.local/opt/ollama/lib/ollama
+ExecStart=/home/nvidia/.local/bin/ollama serve
+Restart=always
+RestartSec=5
+
+MemoryAccounting=yes
+MemoryMax=6G
+MemorySwapMax=0
+OOMPolicy=kill
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ollama
+
+[Install]
+WantedBy=multi-user.target

@@ -6,13 +6,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/agent-core
-EnvironmentFile=%h/agent-core/.env
+User=nvidia
+Group=nvidia
+WorkingDirectory=/home/nvidia/agent-core
+EnvironmentFile=/home/nvidia/agent-core/.env
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH=%h/.local/bin:%h/agent-core/.venv/bin:/usr/local/bin:/usr/bin:/bin
-Environment=TMPDIR=%h/assistant/tmp
-Environment=TEMP=%h/assistant/tmp
-Environment=TMP=%h/assistant/tmp
+Environment=PATH=/home/nvidia/.local/bin:/home/nvidia/agent-core/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TMPDIR=/home/nvidia/assistant/tmp
+Environment=TEMP=/home/nvidia/assistant/tmp
+Environment=TMP=/home/nvidia/assistant/tmp
 # Cursor AppImage leaks ARGV0 into the session; without this the venv python becomes the AppImage.
 UnsetEnvironment=ARGV0
 UnsetEnvironment=APPDIR
@@ -20,7 +22,7 @@ UnsetEnvironment=APPIMAGE
 UnsetEnvironment=LD_LIBRARY_PATH
 UnsetEnvironment=OWD
 
-ExecStart=%h/agent-core/.venv/bin/python -m agent_core.main
+ExecStart=/home/nvidia/agent-core/.venv/bin/python -m agent_core.main
 
 KillSignal=SIGTERM
 TimeoutStopSec=30
@@ -36,14 +38,20 @@ NoNewPrivileges=true
 RestrictSUIDSGID=true
 LockPersonality=true
 PrivateTmp=true
-ReadOnlyPaths=%h/tg_bot_kirpich
-ReadOnlyPaths=%h/agent-core/.env
-ReadOnlyPaths=%h/.config/systemd/user/agent-core.service
-ReadWritePaths=%h/assistant
+ReadOnlyPaths=/home/nvidia/tg_bot_kirpich
+ReadOnlyPaths=/home/nvidia/agent-core/.env
+ReadOnlyPaths=/etc/systemd/system/agent-core.service
+ReadWritePaths=/home/nvidia/assistant
+
+# Kill Cursor+Python rather than letting unified memory exhaust the 14GB Xavier.
+MemoryAccounting=yes
+MemoryMax=6G
+MemorySwapMax=0
+OOMPolicy=kill
 
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=agent-core
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
