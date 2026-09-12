@@ -106,6 +106,42 @@ async def test_one_failed_chunk_does_not_lose_the_rest(tmp_path) -> None:
     assert "Не удалось разобрать фрагменты: 2" in analysis.notes
 
 
+async def test_chunks_run_side_by_side_in_separate_sessions(tmp_path) -> None:
+    """Three sessions, each one prompt at a time; order of the merged notes is by chunk index."""
+    import asyncio
+
+    in_flight = {"now": 0, "peak": 0}
+    release = asyncio.Event()
+
+    async def slow(message, _context):
+        in_flight["now"] += 1
+        in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        if in_flight["now"] >= 3:
+            release.set()
+        await release.wait()
+        in_flight["now"] -= 1
+        index = message.split("Фрагмент ")[1].split(" ")[0]
+        return AgentResponse(text=f"РЕШЕНИЯ: решение {index}")
+
+    backend = FakeBackend(on_prompt=slow)
+    analyzer = TranscriptAnalyzer(
+        backend, workspace_for=lambda _uid: tmp_path, chunk_chars=500, parallel=3
+    )
+
+    analysis = await analyzer.analyze(transcription(30), context_for())
+
+    assert in_flight["peak"] == 3
+    assert len(backend.sessions) == 3
+    assert analysis.failures == []
+    positions = [analysis.notes.index(f"решение {i}") for i in range(1, analysis.chunk_count + 1)]
+    assert positions == sorted(positions)
+    # A session never has two prompts in flight.
+    per_session: dict[str, int] = {}
+    for session_id, _prompt in backend.prompts:
+        per_session[session_id] = per_session.get(session_id, 0) + 1
+    assert sum(per_session.values()) == analysis.chunk_count
+
+
 async def test_progress_is_reported_per_chunk(tmp_path) -> None:
     fractions: list[float] = []
 

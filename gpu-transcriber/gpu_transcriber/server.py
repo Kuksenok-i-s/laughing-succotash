@@ -4,7 +4,7 @@
 thread, so the HTTP layer only has to accept an upload, hand back a number, and stay out of the
 way — and using it means the GPU host's virtualenv needs no packages beyond faster-whisper.
 
-    PUT    /v1/jobs/{id}         raw audio body, query: language, beam_size, filename
+    PUT    /v1/jobs/{id}         raw audio body, query: language, beam_size, filename, prepared
     GET    /v1/jobs/{id}         status and progress
     GET    /v1/jobs/{id}/result  transcript, once status is done
     DELETE /v1/jobs/{id}         forget the job and remove its audio
@@ -207,6 +207,7 @@ class Handler(BaseHTTPRequestHandler):
             language = None
         beam_size = _first(query, "beam_size")
         filename = _first(query, "filename") or job_id
+        prepared = (_first(query, "prepared") or "").lower() in ("1", "true", "yes")
 
         remaining = self._upload_length()
         if remaining is None:
@@ -245,6 +246,7 @@ class Handler(BaseHTTPRequestHandler):
                 filename=filename,
                 language=language,
                 beam_size=int(beam_size) if beam_size and beam_size.isdigit() else None,
+                prepared=prepared,
             )
         )
         self._reply(HTTPStatus.ACCEPTED, job.snapshot())

@@ -27,11 +27,14 @@ class Settings:
     port: int = DEFAULT_PORT
     token: str = ""
 
-    model: str = "large-v3"
+    model: str = "large-v3-turbo"
     device: str = "cuda"
-    compute_type: str = "float16"
-    beam_size: int = 5
+    compute_type: str = "int8_float16"
+    # Beam 2: on Xavier the decoder is the bottleneck and turbo barely moves between 2 and 5.
+    beam_size: int = 2
     vad_filter: bool = True
+    # VAD windows decoded together. 0 = one window at a time. Needs vad_filter.
+    batch_size: int = 8
 
     work_dir: Path = Path("~/.gpu-transcriber").expanduser()
     # Long enough that a Core restart mid-job can still collect the result, short enough that an
@@ -42,7 +45,7 @@ class Settings:
     gpu_lock_path: str = ""
     idle_unload_seconds: float = 600.0
     # Long recordings are split so CUDA working set stays inside MemoryMax. 0 disables.
-    chunk_seconds: float = 600.0
+    chunk_seconds: float = 300.0
     chunk_overlap_seconds: float = 2.0
     max_upload_mb: int = 512
     upload_chunk_size: int = 1024 * 1024
@@ -97,6 +100,7 @@ def from_env(env: Mapping[str, str] | None = None) -> Settings:
         compute_type=text("COMPUTE_TYPE", defaults.compute_type),
         beam_size=number("BEAM_SIZE", defaults.beam_size),
         vad_filter=flag("VAD_FILTER", defaults.vad_filter),
+        batch_size=number("BATCH_SIZE", defaults.batch_size),
         work_dir=(
             Path(work_dir).expanduser().resolve() if work_dir else defaults.work_dir
         ),

@@ -39,6 +39,8 @@ class Job:
     filename: str = ""
     language: str | None = None
     beam_size: int | None = None
+    # The Core already ran the Whisper filter chain on this upload (a DualHost slice): skip it here.
+    prepared: bool = False
     status: str = "queued"
     percent: float = 0.0
     position_sec: float = 0.0

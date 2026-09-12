@@ -81,16 +81,85 @@ def test_the_worker_splits_a_long_file_and_stitches(store) -> None:
         chunk_overlap_seconds=2,
         probe=probe,
         extract=extract,
+        prepare=lambda src, _dest: src,
     )
 
     worker.run_job("01LONG")
 
     job = store.get("01LONG")
     assert job.status == "done"
-    assert copies == [(0.0, 600.0), (598.0, 600.0), (1196.0, 4.0)]
+    # Windows are cut in a thread pool, so only the set is deterministic.
+    assert sorted(copies) == [(0.0, 600.0), (598.0, 600.0), (1196.0, 4.0)]
     assert len(engine.calls) == 3
+    assert [call["audio"].name for call in engine.calls] == ["000.raw.wav", "001.raw.wav", "002.raw.wav"]
     assert job.result["duration"] == 1200.0
     assert "раз" in job.result["text"]
+    assert not (audio.parent / "chunks").exists()
+
+
+def test_a_prepared_upload_skips_the_filter_chain(tmp_path: Path) -> None:
+    """A DualHost slice already carries highpass+loudnorm; running it again wastes CPU."""
+    engine = FakeEngine()
+    engine.load()
+    audio = tmp_path / "slice.wav"
+    audio.write_bytes(b"wav")
+
+    def must_not_prepare(*_args):
+        raise AssertionError("prepare must not run on prepared audio")
+
+    def extract(source: Path, dest: Path, start: float, length: float) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.read_bytes())
+
+    single = transcribe_audio(
+        engine, audio, language="ru", beam_size=2, chunk_seconds=600,
+        probe=lambda _path: 120.0, extract=extract, prepare=must_not_prepare, prepared=True,
+    )
+    assert single["text"] == "первая вторая"
+    assert engine.calls[-1]["audio"] == audio
+
+    split = transcribe_audio(
+        engine, audio, language="ru", beam_size=2, chunk_seconds=300,
+        probe=lambda _path: 600.0, extract=extract, prepare=must_not_prepare, prepared=True,
+    )
+    assert split["duration"] == 600.0
+    assert len(engine.calls) == 4
+
+
+def test_the_next_window_is_cut_while_the_current_one_decodes(tmp_path: Path) -> None:
+    import threading
+
+    engine = FakeEngine(pause_after=1)
+    engine.load()
+    audio = tmp_path / "long.wav"
+    audio.write_bytes(b"wav")
+    cut: list[int] = []
+    cut_event = threading.Event()
+
+    def extract(source: Path, dest: Path, start: float, length: float) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.read_bytes())
+        cut.append(int(dest.name.split(".")[0]))
+        if len(cut) == 2:
+            cut_event.set()
+
+    def run() -> None:
+        transcribe_audio(
+            engine, audio, language="ru", beam_size=2, chunk_seconds=600,
+            probe=lambda _path: 1200.0, extract=extract, prepare=lambda src, _dest: src,
+        )
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        assert engine.reached_pause.wait(timeout=5.0)
+        # The GPU is mid-way through window 0 and window 1 is already on disk.
+        assert cut_event.wait(timeout=5.0)
+        assert sorted(cut)[:2] == [0, 1]
+    finally:
+        engine.resume.set()
+        thread.join(timeout=5.0)
+    assert not thread.is_alive()
 
 
 def test_unknown_duration_does_not_split(tmp_path: Path) -> None:
@@ -110,6 +179,7 @@ def test_unknown_duration_does_not_split(tmp_path: Path) -> None:
         chunk_seconds=600,
         probe=lambda _path: None,
         extract=boom,
+        prepare=lambda src, _dest: src,
     )
 
     assert result["text"] == "первая вторая"

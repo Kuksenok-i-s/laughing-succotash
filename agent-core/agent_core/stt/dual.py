@@ -5,6 +5,11 @@ path. Both hosts consume a shared queue; each free host takes the next slice.
 The first slices detect their language independently until slice zero supplies it.
 A queued or running OCR job on the second Jetson keeps that card off the roster so
 handwriting and whisper do not share it.
+
+Slices are cut by a few ffmpeg processes at once and dispatched as each becomes ready, so the
+GPUs start on slice zero while the rest of the hour is still being cut. The cut already applies
+the Whisper filter chain, and the upload says so (``prepared``) so the GPU host does not run
+loudnorm a second time over the same ten minutes.
 """
 
 from __future__ import annotations
@@ -33,6 +38,14 @@ Probe = Callable[[Path], Awaitable[float | None]]
 Extract = Callable[[Path, Path, float, float], Awaitable[Path]]
 Busy = Callable[[], Awaitable[bool]]
 
+# ffmpeg loudnorm is single-threaded; two cutters keep both GPUs fed on an 8-core Jetson without
+# taking the CPU the local transcriber needs for its own decode.
+DEFAULT_CUT_PARALLEL = 2
+
+
+class _SplitFailed(Exception):
+    """A slice could not be cut; the caller sends the whole file to the primary instead."""
+
 
 class DualHostSTT:
     def __init__(
@@ -47,6 +60,7 @@ class DualHostSTT:
         probe: Probe = probe_duration,
         extract: Extract = extract_slice,
         ocr_busy: Busy | None = None,
+        cut_parallel: int = DEFAULT_CUT_PARALLEL,
     ) -> None:
         self._primary = primary
         self._secondary = secondary
@@ -57,6 +71,7 @@ class DualHostSTT:
         self._probe = probe
         self._extract = extract
         self._ocr_busy = ocr_busy
+        self._cut_parallel = max(1, cut_parallel)
 
     @property
     def ready(self) -> bool:
@@ -102,45 +117,49 @@ class DualHostSTT:
             len(windows),
             duration,
         )
+        cutting = self._cut(audio_path, windows, work)
         try:
-            slices = await self._cut(audio_path, windows, work)
-        except Exception:
-            log.warning(
-                "could not split audio; sending the whole file to the primary GPU",
-                exc_info=True,
-            )
+            return await self._run_slices(cutting, windows, duration, on_progress)
+        except _SplitFailed:
+            log.warning("could not split audio; sending the whole file to the primary GPU")
             shutil.rmtree(work, ignore_errors=True)
             return await self._primary.transcribe(
                 audio_path, on_progress=on_progress, on_notice=on_notice
             )
-
-        try:
-            return await self._run_slices(slices, windows, duration, on_progress)
         finally:
+            for task in cutting:
+                task.cancel()
+            await asyncio.gather(*cutting, return_exceptions=True)
             shutil.rmtree(work, ignore_errors=True)
 
-    async def _cut(
+    def _cut(
         self,
         audio_path: Path,
         windows: list[tuple[float, float]],
         work: Path,
-    ) -> list[tuple[float, Path]]:
-        slices: list[tuple[float, Path]] = []
-        for index, (start, length) in enumerate(windows):
-            dest = work / f"{index:03d}.wav"
-            await self._extract(audio_path, dest, start, length)
-            slices.append((start, dest))
-        return slices
+    ) -> list[asyncio.Task[Path]]:
+        """Start cutting every window; at most ``cut_parallel`` ffmpeg processes at a time."""
+        gate = asyncio.Semaphore(self._cut_parallel)
+
+        async def cut(index: int, start: float, length: float) -> Path:
+            async with gate:
+                return await self._extract(audio_path, work / f"{index:03d}.wav", start, length)
+
+        return [
+            asyncio.create_task(cut(index, start, length))
+            for index, (start, length) in enumerate(windows)
+        ]
 
     async def _run_slices(
         self,
-        slices: list[tuple[float, Path]],
+        cutting: list[asyncio.Task[Path]],
         windows: list[tuple[float, float]],
         duration: float,
         on_progress: ProgressHook | None,
     ) -> TranscriptionResult:
-        fractions = [0.0] * len(slices)
+        fractions = [0.0] * len(cutting)
         lengths = [length for _, length in windows]
+        offsets = [start for start, _ in windows]
 
         def hook(index: int, fraction: float) -> None:
             fractions[index] = min(max(fraction, 0.0), 1.0)
@@ -154,27 +173,38 @@ class DualHostSTT:
                 path,
                 on_progress=lambda fraction, _index=index: hook(_index, fraction),
                 language=language,
+                prepared=True,
             )
             hook(index, 1.0)
             return result
 
         parts: list[tuple[float, TranscriptionResult]] = []
-        pending = deque(range(len(slices)))
+        pending = deque(range(len(cutting)))
         idle = [self._primary, self._secondary]
         active: dict[asyncio.Task, tuple[SpeechToText, int]] = {}
         language: str | None = None
         try:
             while pending or active:
-                while pending and idle:
-                    host = idle.pop(0)
+                # A free host takes the lowest-numbered slice whose cut has finished.
+                while pending and idle and cutting[pending[0]].done():
                     index = pending.popleft()
+                    if cutting[index].cancelled() or cutting[index].exception() is not None:
+                        raise _SplitFailed(index)
+                    host = idle.pop(0)
                     host_name = "primary" if host is self._primary else "secondary"
-                    log.info("dispatching chunk %d/%d to %s GPU", index + 1, len(slices), host_name)
-                    task = asyncio.create_task(run(host, index, slices[index][1], language))
+                    log.info("dispatching chunk %d/%d to %s GPU", index + 1, len(cutting), host_name)
+                    task = asyncio.create_task(
+                        run(host, index, cutting[index].result(), language)
+                    )
                     active[task] = (host, index)
 
-                completed, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                waiting: set[asyncio.Task] = set(active)
+                if pending and idle:
+                    waiting.add(cutting[pending[0]])
+                completed, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
                 for task in completed:
+                    if task not in active:
+                        continue  # a slice finished cutting; the loop above dispatches it
                     host, index = active.pop(task)
                     try:
                         outcome = task.result()
@@ -189,7 +219,7 @@ class DualHostSTT:
                         )
                         pending.appendleft(index)
                         continue
-                    parts.append((slices[index][0], outcome))
+                    parts.append((offsets[index], outcome))
                     if index == 0:
                         language = outcome.language
                     idle.append(host)

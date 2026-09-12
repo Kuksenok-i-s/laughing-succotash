@@ -15,7 +15,7 @@ The Gateway must be reachable from the Core; the Core needs no inbound access at
 asymmetry is deliberate — see [ADR 0002](adr/0002-jsonrpc-over-websocket.md).
 
 Durable Core state lives on Xavier at `/home/nvidia/assistant`. Whisper (`gpu-transcriber`,
-large-v3 float16 on the Xavier GPU — CTranslate2 4.8.1 built for CUDA 11.4 / sm_72) stays on
+large-v3-turbo int8_float16 on the Xavier GPU — CTranslate2 4.8.1 built for CUDA 11.4 / sm_72) stays on
 loopback (`:17493`). Handwriting OCR runs on `10.0.7.98`: `llama-server` serves OvisOCR2 on
 loopback `:8081`, and `handwriting-ocr` publishes the job API on `:17494`. YouTube still
 downloads through the VPS: one file at a time, then the file is pulled onto

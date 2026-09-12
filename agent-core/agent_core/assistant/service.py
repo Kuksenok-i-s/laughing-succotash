@@ -1040,6 +1040,7 @@ class AssistantService:
         return await transcript_topics(
             self._backend, self._settings.user_workspace(job.user_id), context, result,
             chunk_chars=self._settings.transcript_chunk_chars,
+            parallel=self._settings.transcript_parallel,
         )
 
     async def _youtube_summary(

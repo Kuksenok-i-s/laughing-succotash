@@ -100,7 +100,9 @@ class GpuServiceSTT(SpeechToText):
         on_progress: ProgressHook | None = None,
         on_notice: NoticeHook | None = None,
         language: str | None = None,
+        prepared: bool = False,
     ) -> TranscriptionResult:
+        """``prepared`` marks audio that already went through the Whisper filter chain here."""
         if not audio_path.exists():
             raise SttError(f"audio file not found: {audio_path.name}")
         if audio_path.stat().st_size == 0:
@@ -115,7 +117,7 @@ class GpuServiceSTT(SpeechToText):
             started = time.monotonic()
             job_id = new_ulid()
             try:
-                await self._submit(job_id, audio_path, language=job_language)
+                await self._submit(job_id, audio_path, language=job_language, prepared=prepared)
                 await self._await_completion(job_id, on_progress)
                 payload = await self._request("GET", f"/v1/jobs/{job_id}/result")
             finally:
@@ -136,12 +138,16 @@ class GpuServiceSTT(SpeechToText):
 
     # ---- steps -----------------------------------------------------------
 
-    async def _submit(self, job_id: str, audio_path: Path, *, language: str) -> None:
+    async def _submit(
+        self, job_id: str, audio_path: Path, *, language: str, prepared: bool = False
+    ) -> None:
         query = {
             "language": language,
             "beam_size": str(self._beam_size),
             "filename": audio_path.name,
         }
+        if prepared:
+            query["prepared"] = "1"
         with audio_path.open("rb") as handle:
             # aiohttp takes the length from the file handle, so the body is streamed rather than
             # read into memory: an hour of audio is tens of megabytes. Waiting for 100-continue

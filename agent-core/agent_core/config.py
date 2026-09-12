@@ -163,6 +163,9 @@ class Settings(BaseSettings):
     # command, which changes both the prompt and the permission provenance.
     long_transcript_chars: int = 1200
     transcript_chunk_chars: int = 12000
+    # Scratch agent sessions analysing transcript chunks side by side. Each chunk is an
+    # independent prompt, so an hour of speech takes one chunk's time instead of the sum.
+    transcript_parallel: int = Field(default=3, ge=1)
     # Evening diary check-in and the morning of the 1st when last month is summarised.
     journal_hour: int = Field(default=21, ge=0, le=23)
     journal_minute: int = Field(default=0, ge=0, le=59)

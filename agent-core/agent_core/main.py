@@ -142,6 +142,7 @@ class Core:
                 self._backend,
                 workspace_for=self._settings.user_workspace,
                 chunk_chars=self._settings.transcript_chunk_chars,
+                parallel=self._settings.transcript_parallel,
             ),
             youtube=YoutubeDownloader.from_settings(self._settings),
             confirmations=self._confirmations,

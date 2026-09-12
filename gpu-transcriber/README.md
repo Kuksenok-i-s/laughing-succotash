@@ -73,8 +73,15 @@ Deployment as a user systemd unit is in [`../docs/operations.md`](../docs/operat
 **The model loads after the port opens, and unloads after ten idle minutes.** Until the weights
 are in memory `/health` answers `model_loaded: false` and jobs sit in the queue. Refusing
 connections instead would send the Core to its CPU fallback for as long as that process lives.
-`GPU_STT_IDLE_UNLOAD_SECONDS=600` (0 disables) drops `large-v3` so OCR can use the same card; the
-next job reloads it.
+`GPU_STT_IDLE_UNLOAD_SECONDS=600` (0 disables) drops the model so OCR can use the same card; the
+next job reloads it. On a host without OCR set it to 0: a cold load costs tens of seconds per
+voice note.
+
+**Decoding is batched.** Silero VAD cuts the file into speech windows and `GPU_STT_BATCH_SIZE`
+(default 8) of them go through the model together via `BatchedInferencePipeline`; windows are
+decoded independently (`condition_on_previous_text=False`), so a hallucination cannot seed the
+next window. `GPU_STT_BATCH_SIZE=0` or `GPU_STT_VAD_FILTER=false` falls back to one window at a
+time. Default beam is 2: the decoder is the bottleneck and turbo barely moves between 2 and 5.
 
 Whisper runs in a separate spawned process. Idle unloading terminates and joins that process,
 releasing its CUDA context and native allocator pools; the HTTP server and job registry stay
@@ -87,9 +94,23 @@ not guarantee that native memory is returned to the system.
 nobody is waiting for any more.
 
 **One job at a time on this card.** Two large-v3 runs on one GPU are slower together than one after
-the other. A recording longer than ``GPU_STT_CHUNK_SECONDS`` (ten minutes) is split and the slices
+the other. A recording longer than ``GPU_STT_CHUNK_SECONDS`` (five minutes) is split and the slices
 run in sequence on this worker; the Core may send alternate slices to a second Jetson when OCR
 is idle there.
+
+**Audio is prepared before Whisper.** One ffmpeg pass applies `highpass=f=80`, EBU loudnorm
+at -16 LUFS, and 16 kHz mono PCM. Quiet voice notes otherwise starve Silero VAD; rumble
+below 80 Hz is not speech. If ffmpeg fails the original file still goes to the model. An
+upload with `?prepared=1` (a DualHost slice the Core already filtered) skips this pass.
+
+**Windows are cut while the GPU decodes.** A long file is split into 300 s windows by two
+ffmpeg threads running ahead of the decoder, so filter time hides behind decode time instead
+of adding to it. Each window is deleted as soon as its transcript is in.
+
+**On a shared card the weights stay warm between jobs.** With `GPU_STT_GPU_LOCK_PATH` set the
+slot lock is held only for the duration of a job; afterwards the model stays loaded for
+`GPU_STT_IDLE_UNLOAD_SECONDS` so the next slice of the same recording does not pay a cold
+load, and is dropped at once if another process (OCR) takes the slot.
 
 **Audio is the only thing that grows.** It is deleted when the Core collects the result, and swept
 after `GPU_STT_JOB_TTL_SECONDS` otherwise — including spool directories left behind by a restart,

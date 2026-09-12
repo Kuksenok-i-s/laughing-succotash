@@ -32,6 +32,7 @@ class Service:
             compute_type=settings.compute_type,
             beam_size=settings.beam_size,
             vad_filter=settings.vad_filter,
+            batch_size=settings.batch_size,
         )
         self._app = TranscriptionApp(settings, self._store, self._engine)
         self._worker = TranscriptionWorker(

@@ -4,6 +4,11 @@ One job at a time: two large-v3 runs on one card are slower together than one af
 the memory spike risks the process. The model is loaded here rather than at startup so the HTTP
 surface answers immediately. After a stretch of idle time the weights are dropped so OCR can use
 the same card; the next job loads them again.
+
+On a host shared with OCR the slot lock is held only while a job runs. Between jobs the weights
+stay warm for the idle window — the next ten-minute slice of the same recording arrives seconds
+later and should not pay a cold load — but the moment another process takes the slot they are
+dropped so OCR gets the memory it expects.
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ from functools import partial
 
 from .chunks import DEFAULT_CHUNK_SECONDS, DEFAULT_OVERLAP_SECONDS, transcribe_audio
 from .engine import Engine
-from .gpu_lock import gpu_slot
+from .gpu_lock import gpu_claimed_elsewhere, gpu_slot
 from .jobs import JobStore
 
 log = logging.getLogger(__name__)
@@ -34,6 +39,7 @@ class TranscriptionWorker:
         chunk_overlap_seconds: float = DEFAULT_OVERLAP_SECONDS,
         probe=None,
         extract=None,
+        prepare=None,
     ) -> None:
         self._gpu_lock_path = gpu_lock_path
         self._store = store
@@ -44,6 +50,7 @@ class TranscriptionWorker:
         self._chunk_overlap_seconds = chunk_overlap_seconds
         self._probe = probe
         self._extract = extract
+        self._prepare = prepare
         self._last_used = time.monotonic()
 
     def run(self, stop: threading.Event) -> None:
@@ -71,11 +78,7 @@ class TranscriptionWorker:
 
     def run_job(self, job_id: str) -> None:
         with gpu_slot(self._gpu_lock_path):
-            try:
-                self._run_owned_job(job_id)
-            finally:
-                if self._gpu_lock_path:
-                    self._engine.unload()
+            self._run_owned_job(job_id)
 
     def _run_owned_job(self, job_id: str) -> None:
         job = self._store.get(job_id)
@@ -89,6 +92,8 @@ class TranscriptionWorker:
                 kwargs["probe"] = self._probe
             if self._extract is not None:
                 kwargs["extract"] = self._extract
+            if self._prepare is not None:
+                kwargs["prepare"] = self._prepare
             result = transcribe_audio(
                 self._engine,
                 job.audio_path,
@@ -97,6 +102,7 @@ class TranscriptionWorker:
                 on_progress=partial(self._report, job_id),
                 chunk_seconds=self._chunk_seconds,
                 overlap_seconds=self._chunk_overlap_seconds,
+                prepared=job.prepared,
                 **kwargs,
             )
         except Exception as exc:
@@ -115,17 +121,25 @@ class TranscriptionWorker:
         )
 
     def _maybe_unload(self) -> None:
-        if self._idle_unload <= 0 or not self._engine.ready:
+        if not self._engine.ready:
+            return
+        if self._gpu_lock_path and gpu_claimed_elsewhere(self._gpu_lock_path):
+            self._unload("another process took the GPU slot")
+            return
+        if self._idle_unload <= 0:
             return
         idle = time.monotonic() - self._last_used
         if idle < self._idle_unload:
             return
+        self._unload(f"{idle:.0f}s idle")
+
+    def _unload(self, reason: str) -> None:
         try:
             self._engine.unload()
         except Exception:
-            log.exception("idle unload failed")
+            log.exception("unload failed (%s)", reason)
             return
-        log.info("unloaded whisper after %.0fs idle", idle)
+        log.info("unloaded whisper: %s", reason)
 
     def _report(
         self,

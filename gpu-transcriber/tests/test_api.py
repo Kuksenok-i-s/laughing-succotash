@@ -42,8 +42,15 @@ def test_an_upload_queues_a_job_and_spools_the_audio(client: Client, store: JobS
     assert job is not None
     assert job.language == "ru"
     assert job.beam_size == 3
+    assert job.prepared is False
     assert job.audio_path.read_bytes() == b"audio bytes"
     assert store.queue_depth() == 1
+
+
+def test_an_upload_can_declare_its_audio_already_prepared(client: Client, store: JobStore) -> None:
+    client.put_audio("01PREP", b"wav", prepared="1")
+
+    assert store.get("01PREP").prepared is True
 
 
 def test_auto_means_detect_the_language(client: Client, store: JobStore) -> None:

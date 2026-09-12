@@ -13,6 +13,8 @@ def test_defaults_need_only_a_token() -> None:
     assert settings.port == DEFAULT_PORT
     assert settings.host == "127.0.0.1"
     assert settings.device == "cuda"
+    assert settings.beam_size == 2
+    assert settings.batch_size == 8
     assert settings.idle_unload_seconds == 600.0
     assert settings.validate_runtime() == []
 
@@ -32,6 +34,8 @@ def test_the_environment_overrides_every_default(tmp_path: Path) -> None:
             "GPU_STT_PORT": "18000",
             "GPU_STT_MODEL": "/models/large-v3",
             "GPU_STT_COMPUTE_TYPE": "int8",
+            "GPU_STT_BEAM_SIZE": "4",
+            "GPU_STT_BATCH_SIZE": "0",
             "GPU_STT_VAD_FILTER": "no",
             "GPU_STT_WORK_DIR": str(tmp_path / "work"),
             "GPU_STT_MAX_UPLOAD_MB": "64",
@@ -46,6 +50,8 @@ def test_the_environment_overrides_every_default(tmp_path: Path) -> None:
     assert settings.port == 18000
     assert settings.model == "/models/large-v3"
     assert settings.compute_type == "int8"
+    assert settings.beam_size == 4
+    assert settings.batch_size == 0
     assert settings.vad_filter is False
     assert settings.work_dir == tmp_path / "work"
     assert settings.max_upload_bytes == 64 * 1024 * 1024

@@ -1,8 +1,8 @@
 """ffmpeg/ffprobe helpers.
 
-faster-whisper decodes most containers itself, so audio is normally handed to it untouched. What
-we do need before starting an expensive transcription is the duration, so a file over the
-configured limit can be rejected in a second rather than after an hour of CPU time.
+Duration is probed before an expensive GPU job so a file over the limit is refused immediately.
+Slices sent to Whisper are 16 kHz mono with a high-pass and loudnorm: quiet Telegram notes
+starve Silero VAD, and rumble under 80 Hz is not speech.
 """
 
 from __future__ import annotations
@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 
 class AudioProbeError(RuntimeError):
     pass
+
+
+WHISPER_RATE = 16_000
+HIGHPASS_HZ = 80
+LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
+WHISPER_FILTER = f"highpass=f={HIGHPASS_HZ},{LOUDNORM}"
 
 
 def ffmpeg_available() -> bool:
@@ -48,7 +54,11 @@ async def probe_duration(path: Path) -> float | None:
 
 
 async def extract_slice(source: Path, target: Path, start: float, length: float) -> Path:
-    """Cut ``length`` seconds from ``start`` as 16 kHz mono WAV."""
+    """Cut ``length`` seconds from ``start`` as 16 kHz mono WAV for Whisper.
+
+    High-pass and loudnorm run here so DualSTT slices are already at speech
+    level before they hit the GPU service.
+    """
     if shutil.which("ffmpeg") is None:
         raise AudioProbeError("ffmpeg is not installed")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -62,10 +72,12 @@ async def extract_slice(source: Path, target: Path, start: float, length: float)
         f"{length:.3f}",
         "-i",
         str(source),
+        "-af",
+        WHISPER_FILTER,
         "-ac",
         "1",
         "-ar",
-        "16000",
+        str(WHISPER_RATE),
         "-c:a",
         "pcm_s16le",
         str(target),
@@ -89,7 +101,8 @@ async def to_wav16k(source: Path, target: Path) -> Path:
 
     process = await asyncio.create_subprocess_exec(
         "ffmpeg", "-nostdin", "-y", "-i", str(source),
-        "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(target),
+        "-af", WHISPER_FILTER,
+        "-ac", "1", "-ar", str(WHISPER_RATE), "-c:a", "pcm_s16le", str(target),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )

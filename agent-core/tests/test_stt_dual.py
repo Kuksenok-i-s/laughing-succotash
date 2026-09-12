@@ -17,6 +17,7 @@ class FakeGpu:
         self.name = name
         self.fail = fail
         self.calls: list[tuple[str, str | None]] = []
+        self.prepared: list[bool] = []
         self.warmups = 0
         self.ready = True
         self.model_name = name
@@ -34,8 +35,10 @@ class FakeGpu:
         on_progress=None,
         on_notice=None,
         language=None,
+        prepared=False,
     ) -> TranscriptionResult:
         self.calls.append((path.name, language))
+        self.prepared.append(prepared)
         await asyncio.sleep(0)
         if on_progress is not None:
             on_progress(1.0)
@@ -130,6 +133,71 @@ async def test_a_long_file_uses_both_gpus(tmp_path: Path) -> None:
     assert all(lang == "ru" for name, lang in primary.calls + secondary.calls if name >= "002.wav")
     assert result.text.index("000") < result.text.index("001") < result.text.index("002") < result.text.index("003")
     assert result.duration == 1800.0
+    # Slices carry the filter chain already; the GPU host must not run loudnorm again.
+    assert all(primary.prepared) and all(secondary.prepared)
+
+
+async def test_slices_are_dispatched_as_they_are_cut(tmp_path: Path) -> None:
+    """Slice zero goes to a GPU while later slices are still in ffmpeg."""
+    gates = {index: asyncio.Event() for index in range(4)}
+    cut_order: list[int] = []
+    dispatched = asyncio.Event()
+
+    async def slow_extract(_source: Path, dest: Path, start: float, length: float) -> Path:
+        index = int(dest.stem)
+        await gates[index].wait()
+        cut_order.append(index)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return dest
+
+    class Gpu(FakeGpu):
+        async def transcribe(self, path, **kwargs):
+            if path.name == "000.wav":
+                dispatched.set()
+            return await super().transcribe(path, **kwargs)
+
+    primary, secondary = Gpu("p"), Gpu("s")
+    stt = _dual(tmp_path, primary=primary, secondary=secondary, extract=slow_extract, cut_parallel=2)
+    task = asyncio.create_task(stt.transcribe(tmp_path / "talk.wav"))
+    try:
+        gates[0].set()
+        await asyncio.wait_for(dispatched.wait(), 1)
+        assert cut_order == [0]
+        assert not task.done()
+        for index in (1, 2, 3):
+            gates[index].set()
+        result = await asyncio.wait_for(task, 1)
+    finally:
+        for gate in gates.values():
+            gate.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    names = sorted(name for name, _ in primary.calls + secondary.calls)
+    assert names == ["000.wav", "001.wav", "002.wav", "003.wav"]
+    assert result.text.index("000") < result.text.index("003")
+
+
+async def test_cutting_runs_at_most_cut_parallel_at_once(tmp_path: Path) -> None:
+    in_flight = {"now": 0, "peak": 0}
+
+    async def extract(_source: Path, dest: Path, start: float, length: float) -> Path:
+        in_flight["now"] += 1
+        in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        await asyncio.sleep(0.01)
+        in_flight["now"] -= 1
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return dest
+
+    async def probe(_path: Path) -> float:
+        return 3600.0
+
+    stt = _dual(tmp_path, extract=extract, probe=probe, cut_parallel=2)
+    await asyncio.wait_for(stt.transcribe(tmp_path / "talk.wav"), 2)
+
+    assert in_flight["peak"] == 2
 
 
 async def test_a_secondary_failure_retries_on_primary(tmp_path: Path) -> None:

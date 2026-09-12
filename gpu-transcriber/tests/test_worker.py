@@ -170,20 +170,69 @@ def test_the_worker_drains_the_queue_until_told_to_stop(
     assert len(engine.calls) == 2
 
 
-def test_shared_gpu_does_not_preload_and_unloads_after_job(store, engine, tmp_path):
+def test_shared_gpu_does_not_preload_and_keeps_weights_warm_between_jobs(store, engine, tmp_path):
+    """The next slice of the same recording arrives seconds later; it must not pay a cold load."""
     from gpu_transcriber.gpu_lock import gpu_slot
-    worker = TranscriptionWorker(store, engine, gpu_lock_path=str(tmp_path / "gpu.lock"), poll_interval=0.01)
+    lock = str(tmp_path / "gpu.lock")
+    worker = TranscriptionWorker(
+        store, engine, gpu_lock_path=lock, poll_interval=0.01, idle_unload_seconds=10.0
+    )
     stop = threading.Event()
     thread = threading.Thread(target=worker.run, args=(stop,))
-    with gpu_slot(str(tmp_path / "gpu.lock")):
+    with gpu_slot(lock):
         thread.start()
-        _queued(store)
+        _queued(store, "01ONE")
         stop.wait(0.05)
-        assert not engine.ready
+        assert not engine.ready  # OCR holds the card; whisper waits without loading
     try:
-        assert wait_for(lambda: store.get("01JOB").status == "done")
-        assert wait_for(lambda: not engine.ready)
+        assert wait_for(lambda: store.get("01ONE").status == "done")
+        time.sleep(0.05)
+        assert engine.ready and engine.unloads == 0
+        _queued(store, "01TWO")
+        assert wait_for(lambda: store.get("01TWO").status == "done")
+        assert engine.loads == 1
     finally:
         stop.set()
         thread.join(2)
     assert not thread.is_alive()
+
+
+def test_shared_gpu_yields_the_weights_when_another_process_takes_the_slot(store, engine, tmp_path):
+    from gpu_transcriber.gpu_lock import gpu_slot
+    lock = str(tmp_path / "gpu.lock")
+    worker = TranscriptionWorker(
+        store, engine, gpu_lock_path=lock, poll_interval=0.01, idle_unload_seconds=0
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.run, args=(stop,))
+    thread.start()
+    try:
+        _queued(store)
+        assert wait_for(lambda: store.get("01JOB").status == "done")
+        time.sleep(0.05)
+        assert engine.ready
+        with gpu_slot(lock):  # OCR takes the card
+            assert wait_for(lambda: not engine.ready)
+        time.sleep(0.05)
+        assert engine.loads == 1  # released slot does not reload on its own
+    finally:
+        stop.set()
+        thread.join(2)
+    assert not thread.is_alive()
+
+
+def test_idle_unload_applies_on_a_shared_gpu_too(store, engine, tmp_path):
+    worker = TranscriptionWorker(
+        store, engine, gpu_lock_path=str(tmp_path / "gpu.lock"), poll_interval=0.01,
+        idle_unload_seconds=0.05,
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.run, args=(stop,), daemon=True)
+    thread.start()
+    try:
+        _queued(store)
+        assert wait_for(lambda: store.get("01JOB").status == "done")
+        assert wait_for(lambda: engine.unloads == 1)
+    finally:
+        stop.set()
+        thread.join(2)
