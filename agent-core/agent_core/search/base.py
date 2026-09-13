@@ -1,11 +1,12 @@
 """The external-search contract.
 
-No provider is wired up yet, so `web_search` and `web_fetch` are simply not registered and the
-assistant has no network reach at all. This module exists so that adding one later is a matter of
-implementing an interface rather than deciding a policy under time pressure — and the policy is the
-hard part.
+The provider lives in another process. `remote_service.RemoteSearchProvider` speaks to the
+`web-search` service, which holds the Brave key or the SearXNG address and knows nothing about this
+assistant. When that service is not configured, `web_search` and `web_fetch` are simply not
+registered and the assistant has no network reach at all.
 
-Two constraints are baked into the contract rather than left to the implementation:
+The contract stays here, separate from the client, because the hard part is the policy and it must
+hold for any implementation. Two constraints are baked in rather than left to the provider:
 
 Results are structured. Handing the agent a raw HTML page means handing it whatever that page's
 author wrote, in a form where an instruction and a paragraph look identical. A title, a URL and an
@@ -59,9 +60,12 @@ def guard_url(url: str) -> str:
     """Validate a URL for fetching, or raise.
 
     Blocks anything that is not plain HTTP(S) and anything that resolves to a private, loopback or
-    link-local address. Without this, `web_fetch` would be a way to ask the assistant to read the
-    Mac mini's own loopback services — including its MCP endpoint and any other local daemon — from
-    a URL that could have arrived inside an untrusted document.
+    link-local address. Without this, `web_fetch` would be a way to ask the assistant to read this
+    host's own loopback services — including its MCP endpoint and any other local daemon — from a
+    URL that could have arrived inside an untrusted document.
+
+    The service guards again before it connects. That is not redundancy: the two run on different
+    hosts, so the loopback interface each of them protects is a different one.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):

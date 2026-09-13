@@ -88,21 +88,45 @@ class ContextRegistry:
 
     One Cursor session serves one conversation, and turns within a conversation are serialised, so
     a single current-context slot per token is sufficient and unambiguous.
+
+    Some passes are not conversations at all. The YouTube factcheck is one: nothing opens a turn
+    for it, and it should reach the search tools and nothing else. Those get a scoped token, which
+    carries its own context and an allowlist instead of pointing at a conversation.
     """
 
     def __init__(self) -> None:
         self._tokens: dict[str, str] = {}  # token -> conversation_id
         self._current: dict[str, ToolContext] = {}  # conversation_id -> context
+        self._scoped: dict[str, ToolContext] = {}  # token -> its own fixed context
+        self._scopes: dict[str, frozenset[str]] = {}  # token -> tools it may call
 
     def issue_token(self, conversation_id: str) -> str:
         token = new_ulid()
         self._tokens[token] = conversation_id
         return token
 
+    def issue_scoped_token(self, context: ToolContext, *, tools: frozenset[str]) -> str:
+        """A token for a one-off pass, limited to ``tools`` and valid until released."""
+        token = new_ulid()
+        self._scoped[token] = context
+        self._scopes[token] = tools
+        return token
+
+    def release(self, token: str) -> None:
+        self._scoped.pop(token, None)
+        self._scopes.pop(token, None)
+
+    def scope(self, token: str) -> frozenset[str] | None:
+        """The allowlist for a scoped token, or ``None`` when the token is not restricted."""
+        return self._scopes.get(token)
+
     def bind_token(self, token: str, conversation_id: str) -> None:
         self._tokens[token] = conversation_id
 
     def resolve(self, token: str) -> ToolContext | None:
+        scoped = self._scoped.get(token)
+        if scoped is not None:
+            return scoped
         conversation_id = self._tokens.get(token)
         if conversation_id is None:
             return None
@@ -212,7 +236,13 @@ class McpServer:
             return self._ok(message_id, {})
 
         if method == "tools/list":
-            return self._ok(message_id, {"tools": [t.to_mcp() for t in self._registry.list()]})
+            allowed = self._contexts.scope(token)
+            tools = [
+                t.to_mcp()
+                for t in self._registry.list()
+                if allowed is None or t.name in allowed
+            ]
+            return self._ok(message_id, {"tools": tools})
 
         if method == "tools/call":
             return await self._call_tool(token, message_id, body.get("params") or {})
@@ -258,6 +288,17 @@ class McpServer:
         tool = self._registry.get(name)
         if tool is None:
             return self._tool_result(message_id, {"error": f"unknown tool: {name}"}, is_error=True)
+
+        allowed = self._contexts.scope(token)
+        if allowed is not None and name not in allowed:
+            # Not merely hidden from tools/list: a pass reading untrusted content must not be able
+            # to reach a tool by naming it directly.
+            log.warning("tool %s refused for a scoped session", name)
+            return self._tool_result(
+                message_id,
+                {"error": f"{name} is not available in this session"},
+                is_error=True,
+            )
 
         context = self._contexts.resolve(token)
         if context is None:

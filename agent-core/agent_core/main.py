@@ -68,6 +68,7 @@ class Core:
         self._backend = None
         self._stt = None
         self._ocr = None
+        self._search = None
         self._scheduler: Scheduler | None = None
         self._journal: JournalService | None = None
         self._jobs = JobManager()
@@ -118,6 +119,7 @@ class Core:
         self._backend = self._build_backend()
         self._stt = self._build_stt()
         self._ocr = self._build_ocr()
+        self._search = self._build_search()
 
         sessions = SessionManager(
             repos.conversations,
@@ -205,10 +207,9 @@ class Core:
             repos,
             calendar_provider=calendar_provider,
             scheduler=self._scheduler,
-            # No search provider is configured, so web_search and web_fetch are not registered and
-            # the assistant has no network reach through MCP at all. See agent_core/search/base.py
-            # for the contract an implementation has to satisfy.
-            search_provider=None,
+            # None unless SEARCH_ENABLED. Without it web_search and web_fetch go unregistered and
+            # the assistant has no network reach through MCP at all.
+            search_provider=self._search,
             file_delivery=file_delivery,
         )
         log.info("mcp tools registered: %s", ", ".join(registry.names()))
@@ -237,6 +238,13 @@ class Core:
                 await self._ocr.warmup()
             except Exception as exc:
                 log.error("handwriting OCR warmup failed: %s", exc)
+        if self._search is not None:
+            try:
+                await self._search.warmup()
+            except Exception as exc:
+                # Non-fatal: the tools stay registered and report the failure per call, which the
+                # agent can tell the user about. A Core that refuses to boot could not.
+                log.error("web search warmup failed: %s", exc)
         await self._scheduler.start()
         await link.start()
 
@@ -339,6 +347,20 @@ class Core:
             stall_timeout=self._settings.ocr_stall_timeout,
         )
 
+    def _build_search(self):
+        if not self._settings.search_enabled:
+            return None
+        from .search.remote_service import RemoteSearchProvider
+
+        return RemoteSearchProvider(
+            base_url=self._settings.search_service_url,
+            token=self._settings.search_service_token,
+            default_limit=self._settings.search_default_limit,
+            lang=self._settings.search_lang,
+            request_timeout=self._settings.search_request_timeout,
+            fetch_timeout=self._settings.search_fetch_timeout,
+        )
+
     async def _start_backend(self) -> None:
         """Start Cursor eagerly, but do not die if it is not there.
 
@@ -387,6 +409,10 @@ class Core:
         if self._ocr is not None:
             with contextlib.suppress(Exception):
                 await self._ocr.close()
+
+        if self._search is not None:
+            with contextlib.suppress(Exception):
+                await self._search.close()
 
         if self._uploads is not None:
             await self._uploads.shutdown()

@@ -552,6 +552,69 @@ async def test_training_export_returns_csv_without_sending(mcp, repos) -> None:
     assert "70" in payload["files"][0]["csv"]
 
 
+async def test_a_scoped_token_lists_only_the_tools_it_was_given(mcp) -> None:
+    """The YouTube factcheck reads an untrusted transcript and needs search, not the calendar."""
+    server, contexts, _ = mcp
+    token = contexts.issue_scoped_token(
+        _ctx(Provenance.UNTRUSTED_CONTENT), tools=frozenset({"note_search"})
+    )
+
+    status, body = await Client(server, token).rpc("tools/list")
+
+    assert status == 200
+    assert {tool["name"] for tool in body["result"]["tools"]} == {"note_search"}
+
+
+async def test_a_scoped_token_refuses_a_tool_it_was_not_given(mcp) -> None:
+    """Hiding a tool from the listing is not enough; the model can still name it."""
+    server, contexts, _ = mcp
+    token = contexts.issue_scoped_token(
+        _ctx(Provenance.UNTRUSTED_CONTENT), tools=frozenset({"note_search"})
+    )
+
+    payload, is_error = await Client(server, token).call_tool(
+        "task_create", {"title": "из расшифровки", "operation_id": "op-scoped"}
+    )
+
+    assert is_error
+    assert "not available" in payload["error"]
+
+
+async def test_a_scoped_token_carries_its_own_context(mcp) -> None:
+    """It is not a conversation turn, so nothing calls set_current for it."""
+    server, contexts, _ = mcp
+    token = contexts.issue_scoped_token(
+        _ctx(Provenance.UNTRUSTED_CONTENT), tools=frozenset({"note_search"})
+    )
+
+    payload, is_error = await Client(server, token).call_tool("note_search", {"query": "x"})
+
+    assert not is_error
+    assert "error" not in payload
+
+
+async def test_releasing_a_scoped_token_revokes_it(mcp) -> None:
+    server, contexts, _ = mcp
+    token = contexts.issue_scoped_token(
+        _ctx(Provenance.UNTRUSTED_CONTENT), tools=frozenset({"note_search"})
+    )
+    contexts.release(token)
+
+    payload, is_error = await Client(server, token).call_tool("note_search", {"query": "x"})
+
+    assert is_error
+    assert "no active conversation context" in payload["error"]
+
+
+async def test_an_ordinary_token_is_not_restricted(mcp) -> None:
+    server, contexts, _ = mcp
+    client = Client(server, contexts.issue_token("conv"))
+
+    _, body = await client.rpc("tools/list")
+
+    assert len({tool["name"] for tool in body["result"]["tools"]}) > 10
+
+
 def _ctx(provenance: Provenance) -> ToolContext:
     from datetime import datetime, timezone
     from zoneinfo import ZoneInfo

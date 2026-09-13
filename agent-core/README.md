@@ -83,11 +83,14 @@ serial per conversation and concurrent across users, so one user's hour-long tra
 blocks another's question — and control commands like `/cancel` run on their own lane so they are
 not queued behind the job they are meant to cancel.
 
-**Search is not enabled.** `search/base.py` defines the contract — structured results, one URL per
-fetch, no private or loopback addresses — but no provider is wired up, so `web_search` and
-`web_fetch` are not registered and the assistant has no network reach through MCP. The guard is
-written and tested ahead of the provider because the policy is the part that is easy to get wrong,
-and loopback on this machine includes the MCP server itself.
+**Search is off unless a service is configured.** `search/base.py` defines the contract —
+structured results, one URL per fetch, no private or loopback addresses — and
+`search/remote_service.py` speaks it to the `web-search` unit, which holds the Brave key or the
+SearXNG address. With `SEARCH_ENABLED=false`, the default, `web_search` and `web_fetch` are not
+registered and the assistant has no network reach through MCP at all. The fetch guard runs here as
+well as in the service: loopback on this machine includes the MCP server itself, and a URL reaching
+that tool may have arrived inside an untrusted document. `search_many` sends a whole batch in one
+round trip, for the Core's own passes rather than for the model.
 
 **Yandex Calendar can be enabled for one Telegram user.** Set
 `YANDEX_CALENDAR_USER_ID`, `YANDEX_CALENDAR_USERNAME` and

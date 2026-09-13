@@ -151,6 +151,17 @@ class Settings(BaseSettings):
     ocr_stall_timeout: float = 900.0
     max_image_size_mb: int = 32
 
+    # --- Web search (remote only; the service holds the provider credentials) ---
+    # Off by default: with no service configured, web_search and web_fetch are never registered
+    # and the assistant has no network reach through MCP at all.
+    search_enabled: bool = False
+    search_service_url: str = "http://127.0.0.1:17495"
+    search_service_token: str = ""
+    search_default_limit: int = 5
+    search_lang: str = "ru"
+    search_request_timeout: float = 20.0
+    search_fetch_timeout: float = 40.0
+
     # --- YouTube ---
     # yt-dlp runs on the proxy VPS over SSH, one file at a time; the toml holds that host and its key.
     youtube_config: Path | None = None
@@ -289,6 +300,8 @@ class Settings(BaseSettings):
             problems.append("STT_GPU_TOKEN is not set but STT_BACKEND=gpu")
         if self.ocr_enabled and not self.ocr_service_token:
             problems.append("OCR_SERVICE_TOKEN is not set but OCR is enabled")
+        if self.search_enabled and not self.search_service_token:
+            problems.append("SEARCH_SERVICE_TOKEN is not set but search is enabled")
         if not self.allowed_users:
             problems.append("ALLOWED_USERS is empty; the Core would accept nobody")
         for user in self.allowed_users:

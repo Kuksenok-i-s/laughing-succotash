@@ -371,7 +371,8 @@ class AssistantService:
         )
 
         wrapped = wrap(message, agent_context)
-        prompt = f"{prompts.session_preamble()}\n\n{wrapped}" if is_new else wrapped
+        preamble = prompts.session_preamble(search=self._settings.search_enabled)
+        prompt = f"{preamble}\n\n{wrapped}" if is_new else wrapped
 
         self._sessions.begin_turn(conversation_id, tool_context)
         await self._progress(job, "agent")
@@ -1044,8 +1045,26 @@ class AssistantService:
             notes = analysis.notes
             excerpt = analysis.excerpt or excerpt
 
+        # Search, and only search. The factcheck reads a transcript nobody vouched for, so the
+        # session it runs in must not be able to reach the calendar or the notes even if the
+        # transcript asks it to. An empty list here would leave the pass with no search at all.
+        tool_context = ToolContext(
+            user_id=job.user_id,
+            conversation_id=agent_context.conversation_id,
+            provenance=Provenance.UNTRUSTED_CONTENT,
+            job_id=job.job_id,
+            chat_id=job.chat_id,
+            message_id=job.message_id,
+            timezone=agent_context.timezone,
+            now=agent_context.now,
+        )
+        search_entries, scoped_token = self._sessions.open_scoped(
+            tool_context, tools=frozenset({"web_search", "web_fetch"})
+        )
+
         session_id = await self._backend.create_session(
-            workspace=self._settings.user_workspace(job.user_id), mcp_servers=[]
+            workspace=self._settings.user_workspace(job.user_id),
+            mcp_servers=search_entries,
         )
         source = dict(
             title=title,
@@ -1070,6 +1089,9 @@ class AssistantService:
             factcheck = (first.text or "").strip()[:12000]
         except AgentError as exc:
             log.warning("youtube factcheck prompt failed: %s", exc)
+        finally:
+            # The second pass must not search, and a token that outlives its pass is a way back in.
+            self._sessions.close_scoped(scoped_token)
 
         try:
             await self._progress(job, "summarizing", detail=title)

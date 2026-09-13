@@ -43,6 +43,7 @@ yes. See [ADR 0007](docs/adr/0007-tool-permission-model.md).
 | `agent-core/` | Deploy unit B — everything else |
 | `gpu-transcriber/` | Deploy unit C — optional; whisper on a GPU host behind an HTTP API |
 | `handwriting-ocr/` | Deploy unit D — optional; OvisOCR2 handwriting OCR via llama.cpp on `10.0.7.98` |
+| `web-search/` | Deploy unit E — optional; Brave or SearXNG behind one batching HTTP API |
 | `packages/pa-protocol/` | The wire protocol both sides share |
 | `tests/` | End-to-end tests that run both units together |
 | `deploy/` | systemd, launchd and nginx examples |
@@ -60,6 +61,12 @@ LAN, and falls back to transcribing on its own CPU when it is absent. See
 `handwriting-ocr/` is likewise optional and remote-only: photos are recognised by OvisOCR2 through
 llama.cpp (`llama-server`) on `10.0.7.98`, with no local fallback. See
 [ADR 0009](docs/adr/0009-remote-handwriting-ocr.md).
+
+`web-search/` is optional too, and off by default — without it `web_search` and `web_fetch` are
+never registered and the assistant has no network reach through MCP at all. It holds the Brave key
+or the SearXNG address, takes a whole batch of queries at once, and returns nothing but titles,
+URLs and excerpts. See
+[ADR 0010](docs/adr/0010-web-search-as-a-separate-service.md).
 
 ## Documentation
 

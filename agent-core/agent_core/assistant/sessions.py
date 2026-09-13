@@ -165,6 +165,22 @@ class SessionManager:
     def _mcp_entries(self, token: str) -> list[dict]:
         return [self._mcp.session_entry(token)] if self._mcp is not None else []
 
+    def open_scoped(self, context, *, tools: frozenset[str]) -> tuple[list[dict], str | None]:
+        """MCP entries for a one-off session allowed to call only ``tools``.
+
+        For passes that are not a conversation turn and so have no context to resolve through —
+        the YouTube factcheck reads an untrusted transcript and needs search, not the calendar.
+        The caller must pass the token back to ``close_scoped`` when the pass is over.
+        """
+        if self._mcp is None:
+            return [], None
+        token = self._contexts.issue_scoped_token(context, tools=tools)
+        return [self._mcp.session_entry(token)], token
+
+    def close_scoped(self, token: str | None) -> None:
+        if token is not None:
+            self._contexts.release(token)
+
     def begin_turn(self, conversation_id: str, context) -> None:
         self._contexts.set_current(conversation_id, context)
 

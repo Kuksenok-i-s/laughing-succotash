@@ -250,6 +250,115 @@ service.env into logs: it contains the API token. The release passed all 53 test
 then a real API upload returned all eight control lines in one pass. Active settings:
 `OCR_MAX_PASSES=2`, `OCR_IDLE_UNLOAD_SECONDS=3600`, `OCR_OLLAMA_KEEP_ALIVE=1h`.
 
+## Web search (`web-search`)
+
+Optional unit on the Core host itself (`10.0.7.127`). Pure standard library — no venv, no CUDA,
+no weights — so the system interpreter is enough. It binds loopback, which is the point: the Brave
+key stays on this machine and is never handed to the model or sent to the Gateway.
+
+Pick one backend. `searxng` is the default: no key, no card, no quota, and lookups stay on the
+LAN's filtered DNS. `brave` is the hosted alternative.
+
+### SearXNG (default)
+
+Runs as a container on the Core host, bound to loopback, from `deploy/searxng/`:
+
+```bash
+# on Core host 10.0.7.127
+cd ~/tg_bot_kirpich/deploy/searxng
+cp .env.example .env
+sed -i "s|^SEARXNG_SECRET=.*|SEARXNG_SECRET=$(openssl rand -hex 32)|" .env
+docker compose up -d
+
+curl -s "http://127.0.0.1:8888/search?q=test&format=json" | head -c 200
+```
+
+`settings.yml` lists `json` under `search.formats`; without it `/search?format=json` answers 403
+and every query fails. The rate limiter is off because the only client is `web-search` on the same
+host and it would otherwise throttle our own batch. Google is disabled as an upstream engine —
+aggregating it through SearXNG earns captchas instead of results.
+
+Upstream lookups go through Pi-hole at `10.0.7.127`, set both in the compose file's `dns:` and
+daemon-wide in `deploy/docker/daemon.json`. The daemon-wide copy is insurance: Docker falls back to
+Google's `8.8.8.8` when the host's `/etc/resolv.conf` holds only loopback addresses, which this
+host's does (`127.0.0.53`, the systemd-resolved stub). Docker currently reads the real upstreams
+from `/run/systemd/resolve/resolv.conf` and lands on Pi-hole anyway, so nothing is broken today —
+but a `resolved` reconfiguration would move every container's lookups off the filtered path without
+a word. **Merge** that file rather than replacing it: the existing `runtimes` block is what lets GPU
+containers start. Restarting `dockerd` restarts Pi-hole and takes LAN DNS down for a few seconds,
+so pick the moment.
+
+Blocked domains come back as `0.0.0.0` in Pi-hole's NULL mode, which `guard_url` refuses as a
+non-public address — so a tracker domain cannot be fetched even if a page links to it.
+
+### Brave
+
+Register at [api-dashboard.search.brave.com](https://api-dashboard.search.brave.com/), subscribe to
+the **Search** plan (a card is required as an anti-fraud check), then *API Keys → Add API Key*.
+There is no free plan for new accounts any more: Search is $5 per 1000 requests with $5 of credit
+renewed monthly, roughly 1000 queries. Set the dashboard's monthly credit limit to $5 and nothing
+is ever charged. Brave asks for an attribution somewhere public in exchange for the free credit.
+That credit runs at **one request per second**, so set `SEARCH_PARALLEL=1`; a batch of four would
+just collect 429s.
+
+```bash
+# on Core host 10.0.7.127
+install -d -m 700 ~/.config/web-search ~/.web-search/tmp
+install -m 600 ~/tg_bot_kirpich/web-search/service.env.example ~/.config/web-search/service.env
+"${EDITOR:-vi}" ~/.config/web-search/service.env   # set SEARCH_TOKEN, and the backend if not SearXNG
+
+# The unit has no dependencies, but this host's system python is 3.8 and it needs 3.12+, so it
+# runs on a bare venv built from the same uv-managed interpreter the Core uses.
+"$(sed -n 's/^command = \([^ ]*\).*/\1/p' ~/agent-core/.venv/pyvenv.cfg)" \
+    -m venv ~/.assistant/venv-web-search
+
+sudo cp deploy/systemd/web-search.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now web-search
+
+curl -s localhost:17495/health | python3 -m json.tool
+```
+
+Then set `SEARCH_ENABLED=true`, `SEARCH_SERVICE_URL=http://127.0.0.1:17495` and
+`SEARCH_SERVICE_TOKEN` (same value as `SEARCH_TOKEN`) in the Core's `.env` and restart it. The Core
+logs `search service ready at ...`; a `web search warmup failed` there means the token or the
+address, and is deliberately not fatal — the tools stay registered and report the failure per call.
+
+With `SEARCH_ENABLED=false` the `web_search` and `web_fetch` MCP tools are not registered at all,
+and the assistant has no network reach through MCP. That is the default. Turning it on is what gives
+the model a way to pull outside content into a session, so the results carry a standing reminder
+that they are content and not instructions, and anything inferred from them still needs
+confirmation before it is written.
+
+`SEARCH_FETCH_ENABLED=false` narrows it further: snippets only, no way to open a page.
+
+Chat sessions have carried both tools since they were registered, but nothing told the agent to
+prefer them over its own built-in search, so `SEARCH_ENABLED=true` now also adds a paragraph to the
+operating instructions naming `web_search` and `web_fetch` and telling it not to use the built-in
+one. Those instructions only travel with the **first** message of a session, so an existing
+conversation keeps the old ones until the user sends `/new`.
+
+Turning search on also gives the **YouTube factcheck** its search. That pass runs on a scoped MCP
+token limited to `web_search` and `web_fetch`, released the moment the pass ends: it reads a
+transcript nobody vouched for, so it must not be one prompt away from the calendar, and the second
+pass must not search at all. To check the whole pipeline without sending a Telegram message:
+
+```bash
+# on the Core host
+DATA_DIR=~/factcheck-run/data ~/agent-core/.venv/bin/python \
+    ~/tg_bot_kirpich/scripts/factcheck_video.py https://youtu.be/VIDEO_ID
+```
+
+It caches the audio and the transcript under `~/factcheck-run`, so a rerun costs only the agent
+calls. An hour of audio takes about four minutes to transcribe on the Xavier.
+
+Some sources are simply unreachable from this network — `fbi.gov` does not answer at all, on either
+address family. `web_fetch` reports that as a `502` and the pass falls back to the search snippet,
+which is the right outcome but worth knowing when a citation looks thinner than expected.
+
+`/health` reports `backend_reachable`. For SearXNG it probes `/config`; for Brave it reports the
+outcome of the last real query, because a probe would spend quota.
+
 ## First run checklist
 
 1. `journalctl -u telegram-gateway` shows `core ... connected (capabilities: ...)`.
@@ -280,6 +389,10 @@ systemctl --user restart gpu-transcriber
 
 cd ~/handwriting-ocr/src && git pull
 systemctl --user restart handwriting-ocr
+
+# Core host, if search is enabled
+cd ~/tg_bot_kirpich && git pull
+sudo systemctl restart web-search
 ```
 
 Restarting the transcription service loses a job in flight; the Core notices, says so in Telegram

@@ -130,6 +130,9 @@ class FakeBackend:
         self.prompts: list[tuple[str, str]] = []
         self.contexts: list = []
         self.sessions: list[str] = []
+        # Recorded per session, because which tools a pass can reach is part of its behaviour:
+        # the YouTube factcheck must get search and nothing else.
+        self.session_mcp: list[list[dict] | None] = []
         self.cancelled: list[str] = []
         self.modes: list[tuple[str, str]] = []
         self.started = False
@@ -153,6 +156,7 @@ class FakeBackend:
         self._counter += 1
         session_id = f"session-{self._counter}"
         self.sessions.append(session_id)
+        self.session_mcp.append(mcp_servers)
         return session_id
 
     async def resume_session(self, session_id, workspace, *, mcp_servers=None) -> bool:

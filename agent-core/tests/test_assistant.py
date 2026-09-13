@@ -212,6 +212,19 @@ async def test_the_first_turn_carries_the_operating_instructions(build, backend)
     assert backend.sessions == ["session-1"]
 
 
+async def test_the_first_turn_offers_search_once_the_service_is_configured(
+    build, backend, settings
+) -> None:
+    """Chat sessions always had the tools; nothing told the agent to prefer them over its own."""
+    settings.search_enabled = True
+
+    service, jobs = build()
+    await service.submit(submit_params("сколько сейчас стоит биткоин"))
+    assert await jobs.wait_idle()
+
+    assert "`web_search`" in backend.prompts[0][1]
+
+
 async def test_a_markdown_file_request_is_delivered_as_a_document(
     build, gateway, backend
 ) -> None:
@@ -1038,6 +1051,40 @@ async def test_a_youtube_summary_factchecks_then_writes_the_document(
     assert "Фактчек" in documents[0]["content"]
     assert "https://www.enisa.europa.eu/topics/cyber-threats" in documents[0]["content"]
     assert replies == []
+
+
+async def test_the_youtube_factcheck_gets_search_and_nothing_else(
+    build, backend, contexts, tmp_path
+) -> None:
+    """The pass used to run with no MCP at all, which left it no search to call.
+
+    Handing it the ordinary session entry would be the other mistake: it reads a transcript
+    nobody vouched for, and that must not be one prompt away from the calendar.
+    """
+    youtube = FakeYoutube(title="Лекция", tmp_path=tmp_path)
+    scopes: list[frozenset[str] | None] = []
+
+    def respond(message, _context):
+        if "Это первый ход" in message:
+            # While the pass is running: the token exists and is restricted.
+            token = backend.session_mcp[-1][0]["url"].rsplit("/", 1)[1]
+            scopes.append(contexts.scope(token))
+        return "ПРОВЕРЯТЬ: нет\nПРИЧИНА: нечего проверять"
+
+    backend.on_prompt = respond
+    service, jobs = build(stt=FakeStt(text="текст лекции"), youtube=youtube)
+    await service.submit(submit_params("конспект https://youtu.be/jNQXAC9IVRw"))
+    assert await jobs.wait_idle()
+
+    assert scopes == [frozenset({"web_search", "web_fetch"})]
+
+    entries = backend.session_mcp[0]
+    assert entries, "the factcheck session was created without any MCP server"
+    token = entries[0]["url"].rsplit("/", 1)[1]
+    # Released with the pass: the second pass must not search, and a token that outlives its
+    # pass is a way back in.
+    assert contexts.scope(token) is None
+    assert contexts.resolve(token) is None
 
 
 async def test_a_youtube_summary_still_writes_if_factcheck_fails(
