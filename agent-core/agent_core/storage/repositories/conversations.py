@@ -86,6 +86,48 @@ class ConversationRepository:
         )
         return [(row["user_id"], int(row["last_chat_id"])) for row in rows]
 
+    async def users_with_journal(self) -> list[tuple[str, int]]:
+        """Users who opted into the evening diary and can be reached."""
+        rows = await self._db.fetch_all(
+            "SELECT user_id, last_chat_id FROM users "
+            "WHERE last_chat_id IS NOT NULL AND journal_enabled = 1"
+        )
+        return [(row["user_id"], int(row["last_chat_id"])) for row in rows]
+
+    async def journal_enabled(self, user_id: str) -> bool:
+        value = await self._db.fetch_value(
+            "SELECT journal_enabled FROM users WHERE user_id = ?", (user_id,)
+        )
+        return bool(value)
+
+    async def set_journal_enabled(self, user_id: str, enabled: bool) -> bool:
+        """Persist the evening-diary opt-in. ``True`` if the stored value changed."""
+        await self.ensure_user(user_id)
+        if await self.journal_enabled(user_id) == enabled:
+            return False
+        await self._db.execute(
+            "UPDATE users SET journal_enabled = ?, updated_at = ? WHERE user_id = ?",
+            (1 if enabled else 0, utcnow().isoformat(), user_id),
+        )
+        return True
+
+    async def journal_sunset_on(self, user_id: str) -> str | None:
+        value = await self._db.fetch_value(
+            "SELECT journal_sunset_on FROM users WHERE user_id = ?", (user_id,)
+        )
+        return str(value) if value else None
+
+    async def mark_journal_sunset(self, user_id: str, local_date: str) -> bool:
+        """Record the sunset-notice date. ``True`` if this call wrote it."""
+        await self.ensure_user(user_id)
+        if await self.journal_sunset_on(user_id) is not None:
+            return False
+        await self._db.execute(
+            "UPDATE users SET journal_sunset_on = ?, updated_at = ? WHERE user_id = ?",
+            (local_date, utcnow().isoformat(), user_id),
+        )
+        return True
+
     async def set_timezone(self, user_id: str, tz_name: str) -> None:
         ZoneInfo(tz_name)  # reject an invalid zone before persisting it
         await self._db.execute(

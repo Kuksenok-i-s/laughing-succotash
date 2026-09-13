@@ -25,6 +25,21 @@ log = logging.getLogger(__name__)
 
 TOOL = "journal.checkin"
 TTL_SECONDS = 16 * 3600
+ENABLE_PHRASE = "включи дневник для меня"
+SUNSET_NOTICE_ID = "journal-off-notice:v1"
+SUNSET_NOTICE = (
+    "Вечерний дневник отключается.\n\n"
+    "Это вместо сегодняшнего опроса: больше не буду писать каждый вечер всем. "
+    "Если хотите вести дневник по расписанию, начните новый разговор и напишите:\n"
+    "Включи дневник для меня\n\n"
+    "Старые записи сохранены. /journal и кнопка «Дневник» по-прежнему "
+    "открывают сегодняшний день."
+)
+ENABLE_REPLY = (
+    "Включил вечерний дневник. Каждый вечер около 21:00 спрошу про работу и личное, "
+    "в конце месяца подведу итог. Старые записи на месте."
+)
+ALREADY_ENABLED_REPLY = "Вечерний дневник уже включён. Старые записи на месте."
 
 _MONTH_GENITIVE = (
     "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -82,16 +97,32 @@ class JournalService:
         await self.offer_due(now)
         await self.summarize_due(now)
 
+    async def enable(self, user_id: str) -> bool:
+        """Opt this user into the evening schedule. ``True`` if the flag changed."""
+        return await self._repos.conversations.set_journal_enabled(user_id, True)
+
     async def offer_due(self, now: datetime) -> None:
         if not self._enabled:
             return
         for user_id, chat_id in await self._repos.conversations.users_with_chat():
             user_tz = await self._repos.conversations.timezone_for(user_id)
             local = now.astimezone(user_tz)
-            if (local.hour, local.minute) < (self._hour, self._minute):
-                continue
             today = local.date().isoformat()
             await self._repos.journal.close_stale(user_id, today)
+            if (local.hour, local.minute) < (self._hour, self._minute):
+                continue
+            sunset_on = await self._repos.conversations.journal_sunset_on(user_id)
+            if sunset_on is None:
+                await self._say(
+                    user_id, chat_id, SUNSET_NOTICE,
+                    delivery_id=f"{SUNSET_NOTICE_ID}:{user_id}",
+                )
+                await self._repos.conversations.mark_journal_sunset(user_id, today)
+                continue
+            if sunset_on == today:
+                continue
+            if not await self._repos.conversations.journal_enabled(user_id):
+                continue
             existing = await self._repos.journal.get_by_date(user_id, today)
             if existing is not None:
                 continue
@@ -367,6 +398,13 @@ class JournalService:
             delivery_id=delivery,
             user_id=user_id,
         )
+
+
+def is_enable_phrase(text: str) -> bool:
+    """True when the message is exactly the opt-in phrase, ignoring case and punctuation."""
+    folded = (text or "").strip().lower().replace("ё", "е")
+    folded = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in folded)
+    return " ".join(folded.split()) == ENABLE_PHRASE
 
 
 def previous_month(local: datetime) -> tuple[str, str, str]:

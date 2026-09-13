@@ -323,10 +323,8 @@ class AssistantService:
         if not text.strip():
             return
         attr = attribution.from_payload(job.payload, owner_id=job.user_id)
-        if (
-            self.journal is not None
-            and not (attr is not None and attr.foreign)
-            and await self.journal.capture(job.user_id, text, chat_id=job.chat_id)
+        if await self._intercept_journal(
+            job, text, foreign=attr is not None and attr.foreign
         ):
             return
         if attr is not None and attr.foreign:
@@ -425,12 +423,8 @@ class AssistantService:
             return
 
         attr = attribution.from_payload(job.payload, owner_id=job.user_id)
-        if (
-            self.journal is not None
-            and not (attr is not None and attr.foreign)
-            and await self.journal.capture(
-                job.user_id, transcription.text or "", chat_id=job.chat_id
-            )
+        if await self._intercept_journal(
+            job, transcription.text or "", foreign=attr is not None and attr.foreign
         ):
             return
 
@@ -476,13 +470,7 @@ class AssistantService:
         if not markdown:
             raise OcrError("no text detected in the image")
 
-        if (
-            self.journal is not None
-            and not _is_foreign(job)
-            and await self.journal.capture(
-                job.user_id, markdown, chat_id=job.chat_id
-            )
-        ):
+        if await self._intercept_journal(job, markdown, foreign=_is_foreign(job)):
             return
 
         await self._analyze_document(job, markdown, caption=caption)
@@ -541,11 +529,7 @@ class AssistantService:
                     body = "_(пусто)_"
                 chunks.append(f"## {title}\n\n{body}")
             markdown = "\n\n".join(chunks) + truncated
-            if (
-                self.journal is not None
-                and not _is_foreign(job)
-                and await self.journal.capture(job.user_id, markdown, chat_id=job.chat_id)
-            ):
+            if await self._intercept_journal(job, markdown, foreign=_is_foreign(job)):
                 return
             await self._analyze_document(job, markdown, caption=caption, album=True)
             return
@@ -1150,6 +1134,29 @@ class AssistantService:
         else:
             log.info("unhandled command %s from %s", command, job.user_id)
             await self._reply(job, "Не знаю такую команду.")
+
+    async def _intercept_journal(self, job: Job, text: str, *, foreign: bool) -> bool:
+        """Opt-in phrase or an in-progress check-in. ``True`` means the agent must not see this."""
+        from ..journal.service import is_enable_phrase
+
+        if self.journal is None or foreign:
+            return False
+        if is_enable_phrase(text):
+            await self._enable_journal(job)
+            return True
+        return await self.journal.capture(job.user_id, text, chat_id=job.chat_id)
+
+    async def _enable_journal(self, job: Job) -> None:
+        from ..journal.service import ALREADY_ENABLED_REPLY, ENABLE_REPLY
+
+        if self.journal is None:
+            await self._reply(job, "Дневник сейчас недоступен.")
+            return
+        changed = await self.journal.enable(job.user_id)
+        if changed and self._sessions is not None:
+            conversation_id = await self._sessions.reset(job.user_id)
+            job.payload["conversation_id"] = conversation_id
+        await self._reply(job, ENABLE_REPLY if changed else ALREADY_ENABLED_REPLY)
 
     async def _cancel_active(self, job: Job) -> str:
         active = [

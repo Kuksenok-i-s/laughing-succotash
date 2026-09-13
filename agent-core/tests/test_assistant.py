@@ -756,6 +756,59 @@ async def test_the_journal_command_starts_today(build, gateway, repos, backend, 
     assert backend.prompts == []
 
 
+async def test_enable_journal_phrase_opts_in_and_starts_a_new_dialog(
+    build, gateway, repos, backend, settings
+) -> None:
+    from agent_core.assistant.confirmations import ConfirmationService
+    from agent_core.journal import JournalService
+
+    confirmations = ConfirmationService(repos.pending_actions, gateway, timeout_seconds=60)
+    journal = JournalService(
+        repos, confirmations, gateway, default_timezone=settings.default_timezone,
+    )
+    confirmations.register_handler(JournalService.TOOL, journal.handle)
+    service, jobs = build(journal=journal)
+
+    await repos.conversations.ensure_user("tg:1")
+    await repos.conversations.remember_chat("tg:1", 500)
+    previous = await repos.conversations.create_conversation("tg:1")
+
+    await service.submit(submit_params("Включи дневник для меня"))
+    assert await jobs.wait_idle()
+
+    assert backend.prompts == []
+    assert await repos.conversations.journal_enabled("tg:1") is True
+    active = await repos.conversations.active_conversation("tg:1")
+    assert active is not None
+    assert active.conversation_id != previous.conversation_id
+    assert any("Включил вечерний дневник" in text for text in gateway.texts())
+
+
+async def test_a_forwarded_enable_phrase_does_not_opt_in(
+    build, gateway, repos, backend, settings
+) -> None:
+    from agent_core.assistant.confirmations import ConfirmationService
+    from agent_core.journal import JournalService
+
+    confirmations = ConfirmationService(repos.pending_actions, gateway, timeout_seconds=60)
+    journal = JournalService(
+        repos, confirmations, gateway, default_timezone=settings.default_timezone,
+    )
+    confirmations.register_handler(JournalService.TOOL, journal.handle)
+    service, jobs = build(journal=journal)
+
+    await repos.conversations.ensure_user("tg:1")
+    await repos.conversations.remember_chat("tg:1", 500)
+
+    await service.submit(
+        submit_params("Включи дневник для меня", source=_foreign_source())
+    )
+    assert await jobs.wait_idle()
+
+    assert await repos.conversations.journal_enabled("tg:1") is False
+    assert backend.prompts
+
+
 async def test_a_voice_reply_fills_the_journal(
     build, gateway, repos, backend, settings
 ) -> None:

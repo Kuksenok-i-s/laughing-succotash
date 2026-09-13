@@ -9,7 +9,7 @@ import pytest
 
 from agent_core.assistant.confirmations import ConfirmationService
 from agent_core.assistant.service import AssistantService
-from agent_core.journal import JournalService, previous_month
+from agent_core.journal import JournalService, is_enable_phrase, previous_month
 from agent_core.journal.questions import PERSONAL
 from agent_core.scheduler.service import Scheduler
 
@@ -31,9 +31,15 @@ def journal(repos, gateway, settings):
     return service, confirmations
 
 
-async def _user(repos, chat_id: int = 500) -> None:
+async def _user(
+    repos, chat_id: int = 500, *, journal: bool = True, sunset_on: str | None = "2026-08-26"
+) -> None:
     await repos.conversations.ensure_user("tg:1")
     await repos.conversations.remember_chat("tg:1", chat_id)
+    if journal:
+        await repos.conversations.set_journal_enabled("tg:1", True)
+    if sunset_on:
+        await repos.conversations.mark_journal_sunset("tg:1", sunset_on)
 
 
 def _press(gateway) -> str:
@@ -48,6 +54,79 @@ async def test_nothing_is_asked_before_evening(journal, repos, gateway) -> None:
 
     assert gateway.confirms() == []
     assert await repos.journal.get_by_date("tg:1", "2026-08-27") is None
+
+
+async def test_evening_prompt_stays_off_without_opt_in(journal, repos, gateway) -> None:
+    service, _ = journal
+    await _user(repos, journal=False)
+
+    await service.tick(EVENING)
+
+    assert gateway.confirms() == []
+    assert await repos.journal.get_by_date("tg:1", "2026-08-27") is None
+
+
+async def test_next_evening_mailing_is_a_sunset_warning(journal, repos, gateway) -> None:
+    service, _ = journal
+    await _user(repos, journal=False, sunset_on=None)
+
+    await service.tick(BEFORE)
+    assert gateway.texts() == []
+
+    await service.tick(EVENING)
+    await service.tick(EVENING)
+
+    notices = [text for text in gateway.texts() if "Вечерний дневник отключается" in text]
+    assert len(notices) == 1
+    assert "Включи дневник для меня" in notices[0]
+    assert gateway.confirms() == []
+    assert await repos.journal.get_by_date("tg:1", "2026-08-27") is None
+    assert await repos.conversations.journal_sunset_on("tg:1") == "2026-08-27"
+
+
+async def test_sunset_evening_does_not_start_a_checkin_even_if_opted_in(
+    journal, repos, gateway
+) -> None:
+    service, _ = journal
+    await _user(repos, sunset_on=None)
+
+    await service.tick(EVENING)
+
+    assert gateway.confirms() == []
+    assert any("отключается" in text for text in gateway.texts())
+    assert await repos.journal.get_by_date("tg:1", "2026-08-27") is None
+
+
+async def test_after_sunset_the_next_day_offers_only_if_opted_in(
+    journal, repos, gateway
+) -> None:
+    service, _ = journal
+    await _user(repos, sunset_on=None)
+
+    await service.tick(EVENING)
+    next_evening = datetime(2026, 8, 28, 18, 0, tzinfo=timezone.utc)
+    await service.tick(next_evening)
+
+    assert len(gateway.confirms()) == 1
+    assert "Дневник за 28 авг" in gateway.confirms()[0]["text"]
+
+
+async def test_old_entries_survive_the_sunset_warning(journal, repos, gateway) -> None:
+    service, _ = journal
+    await _user(repos, journal=False, sunset_on=None)
+    entry, _ = await repos.journal.ensure(user_id="tg:1", local_date="2026-08-26", step="done")
+    await repos.journal.update(
+        entry.entry_id, "tg:1", answers={"work": "закрыл релиз"}, complete=True,
+    )
+
+    await service.tick(EVENING)
+
+    stored = await repos.journal.get_by_date("tg:1", "2026-08-26")
+    assert stored is not None
+    assert stored.status == "complete"
+    assert stored.answers["work"] == "закрыл релиз"
+    assert await repos.journal.get_by_date("tg:1", "2026-08-27") is None
+    assert gateway.confirms() == []
 
 
 async def test_evening_prompt_is_offered_once(journal, repos, gateway) -> None:
@@ -231,6 +310,24 @@ async def test_previous_month_window() -> None:
     assert period == "2026-08"
     assert start == "2026-08-01"
     assert end == "2026-08-31"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Включи дневник для меня",
+        "включи дневник для меня!",
+        "  Включи  дневник для меня. ",
+    ],
+)
+def test_enable_phrase_is_recognised(text: str) -> None:
+    assert is_enable_phrase(text)
+
+
+def test_neighbouring_text_is_not_an_opt_in() -> None:
+    assert not is_enable_phrase("включи дневник")
+    assert not is_enable_phrase("включи дневник для меня, пожалуйста")
+    assert not is_enable_phrase("что у меня завтра?")
 
 
 async def test_disabled_journal_does_not_prompt(repos, gateway, settings) -> None:

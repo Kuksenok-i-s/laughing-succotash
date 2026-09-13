@@ -53,6 +53,7 @@ def test_the_session_preamble_tells_the_agent_to_use_file_send() -> None:
     assert "trainer" in text
     assert "training_progress" in text
     assert "осталось" in text
+    assert "Включи дневник для меня" in text
 
 
 def test_file_intent_is_detected() -> None:

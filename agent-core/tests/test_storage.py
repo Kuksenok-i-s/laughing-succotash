@@ -125,6 +125,29 @@ async def test_one_journal_row_per_user_per_day(repos) -> None:
     assert first.entry_id == second.entry_id
 
 
+async def test_journal_schedule_is_off_until_the_user_opts_in(repos) -> None:
+    await repos.conversations.ensure_user("tg:1")
+    await repos.conversations.remember_chat("tg:1", 500)
+
+    assert await repos.conversations.journal_enabled("tg:1") is False
+    assert await repos.conversations.users_with_journal() == []
+
+    assert await repos.conversations.set_journal_enabled("tg:1", True) is True
+    assert await repos.conversations.journal_enabled("tg:1") is True
+    assert await repos.conversations.users_with_journal() == [("tg:1", 500)]
+    assert await repos.conversations.set_journal_enabled("tg:1", True) is False
+
+
+async def test_journal_sunset_is_recorded_once(repos) -> None:
+    await repos.conversations.ensure_user("tg:1")
+
+    assert await repos.conversations.journal_sunset_on("tg:1") is None
+    assert await repos.conversations.mark_journal_sunset("tg:1", "2026-08-27") is True
+    assert await repos.conversations.journal_sunset_on("tg:1") == "2026-08-27"
+    assert await repos.conversations.mark_journal_sunset("tg:1", "2026-08-28") is False
+    assert await repos.conversations.journal_sunset_on("tg:1") == "2026-08-27"
+
+
 async def test_a_new_conversation_archives_the_previous_one(repos) -> None:
     first = await repos.conversations.create_conversation("tg:1")
     second = await repos.conversations.create_conversation("tg:1")

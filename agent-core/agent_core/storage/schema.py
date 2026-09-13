@@ -465,4 +465,20 @@ MIGRATIONS: list[tuple[str, str]] = [
         ALTER TABLE training_programs ADD COLUMN weeks INTEGER;
         """,
     ),
+    (
+        # Evening diary is opt-in. Existing journal_entries stay; the scheduler only pings
+        # users who asked for it. Default 0 so a deploy does not keep prompting everyone.
+        "0012_journal_opt_in",
+        """
+        ALTER TABLE users ADD COLUMN journal_enabled INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    (
+        # Local date of the one-time "journal is turning off" evening notice. That slot
+        # replaces the check-in; later evenings only go to journal_enabled users.
+        "0013_journal_sunset",
+        """
+        ALTER TABLE users ADD COLUMN journal_sunset_on TEXT;
+        """,
+    ),
 ]
