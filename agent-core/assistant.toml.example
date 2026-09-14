@@ -1,0 +1,16 @@
+# Filesystem and project allowlists for the Agent Core.
+#
+# Copy to DATA_DIR/assistant.toml (or point CONFIG_FILE at it).
+#
+# The Telegram Cursor agent does NOT use these lists for ordinary chat. Each user is confined to
+# DATA_DIR/user_{tg_id} (created automatically). Leave [projects] empty unless you intentionally
+# open a coding workspace — never add this assistant's own repository as a writable project.
+
+# Optional extra read roots for future features. Prefer empty; the agent must not browse $HOME.
+files = []
+
+# Example of a coding project (omit in production for the personal assistant):
+# [projects.example]
+# path = "/home/me/projects/example"
+# writable = false
+# description = "Read-only example — plan mode only"

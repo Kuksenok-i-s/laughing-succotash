@@ -1,0 +1,57 @@
+[Unit]
+Description=Agent Core (personal assistant)
+Documentation=https://github.com/yourname/personal-assistant/blob/main/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=core
+Group=core
+WorkingDirectory=/home/core/agent-core
+EnvironmentFile=/home/core/agent-core/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/core/.local/bin:/home/core/agent-core/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TMPDIR=/home/core/assistant/tmp
+Environment=TEMP=/home/core/assistant/tmp
+Environment=TMP=/home/core/assistant/tmp
+# Cursor AppImage leaks ARGV0 into the session; without this the venv python becomes the AppImage.
+UnsetEnvironment=ARGV0
+UnsetEnvironment=APPDIR
+UnsetEnvironment=APPIMAGE
+UnsetEnvironment=LD_LIBRARY_PATH
+UnsetEnvironment=OWD
+
+ExecStart=/home/core/agent-core/.venv/bin/python -m agent_core.main
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+# Soft containment for Cursor's built-in shell (ACP does not permission it): the agent process
+# must not rewrite its own source tree or secrets. Per-user DATA_DIR/user_* isolation is enforced
+# in ACP fs/*; chat sessions additionally run in Cursor plan mode (see assistant/sessions.py).
+# Hardening mirrors the GPU units; ProtectHome is intentionally omitted — Cursor CLI, .env and
+# DATA_DIR live under $HOME.
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+PrivateTmp=true
+ReadOnlyPaths=/home/core/tg_bot_kirpich
+ReadOnlyPaths=/home/core/agent-core/.env
+ReadOnlyPaths=/etc/systemd/system/agent-core.service
+ReadWritePaths=/home/core/assistant
+
+# Kill Cursor+Python rather than letting unified memory exhaust the 14GB Xavier.
+MemoryAccounting=yes
+MemoryMax=6G
+MemorySwapMax=0
+OOMPolicy=kill
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-core
+
+[Install]
+WantedBy=multi-user.target

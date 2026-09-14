@@ -1,0 +1,53 @@
+# SearXNG as the search backend for web-search.
+#
+# Runs on the Core host beside web-search and publishes nothing: port 8888 is bound to loopback,
+# because the only client is web-search on the same machine, which in turn is the only thing the
+# Core reaches. Nothing here is exposed to the LAN.
+#
+# Start with:
+#   cp .env.example .env && sed -i "s|^SEARXNG_SECRET=.*|SEARXNG_SECRET=$(openssl rand -hex 32)|" .env
+#   docker compose up -d
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+
+    # Loopback only. web-search reaches it at http://127.0.0.1:8888.
+    ports:
+      - "127.0.0.1:8888:8080"
+
+    # Pi-hole on the Core host, so every upstream engine lookup goes through the filter instead of
+    # Docker's default path. Docker's documented fallback when the host's /etc/resolv.conf holds
+    # only loopback addresses is 8.8.8.8 — a host that later enables systemd-resolved would get
+    # exactly that, silently leaving the filtered path. /etc/docker/daemon.json sets the same
+    # thing daemon-wide (see deploy/docker/daemon.json); this line means a container started
+    # without that config still cannot drift.
+    # dns:
+    #   - <core-host>   # Pi-hole; see docs/infra.local.md
+
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8888/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:?copy .env.example to .env and set a secret}
+
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+
+    # A search box does not need a gigabyte. Bounded so it cannot crowd out the Core.
+    mem_limit: 512m
+    memswap_limit: 512m
+
+    # Nothing is persisted, so the log is the only thing here that grows.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

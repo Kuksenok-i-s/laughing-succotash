@@ -1,0 +1,17 @@
+[Unit]
+Description=Create a consistent SQLite and user-file backup of Assistant
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/assistant-backup/assistant_backup_daily.py --source /home/core/assistant --output /var/lib/assistant-backups --keep 2 --reader-group assistant-backup
+Nice=15
+IOSchedulingClass=idle
+MemoryMax=256M
+TimeoutStartSec=2h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/assistant-backups

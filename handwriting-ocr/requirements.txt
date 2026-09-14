@@ -1,0 +1,4 @@
+# Runtime image preprocessing; versions match uv.lock.
+pillow==12.3.0
+opencv-python-headless==4.13.0.92
+numpy==2.5.2

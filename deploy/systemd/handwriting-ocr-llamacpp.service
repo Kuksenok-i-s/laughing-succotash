@@ -1,0 +1,40 @@
+[Unit]
+# System unit for handwriting OCR on the llama.cpp OCR host.
+# Talks to local llama-server VL on 127.0.0.1:8081. The job API is on the LAN.
+Description=Handwriting OCR service (Qwen3-VL via llama.cpp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=core
+Group=core
+WorkingDirectory=/home/core/handwriting-ocr
+EnvironmentFile=/home/core/.config/handwriting-ocr/service.env
+Environment=PYTHONPATH=/home/core/handwriting-ocr
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/core/.local/bin:/home/core/.assistant/venv-ocr/bin:/usr/bin:/bin
+Environment=TMPDIR=/home/core/.handwriting-ocr/tmp
+Environment=TEMP=/home/core/.handwriting-ocr/tmp
+Environment=TMP=/home/core/.handwriting-ocr/tmp
+ExecStart=/home/core/.assistant/venv-ocr/bin/python -m handwriting_ocr.main
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+MemoryAccounting=yes
+MemoryMax=1G
+MemorySwapMax=0
+OOMPolicy=kill
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=handwriting-ocr
+
+[Install]
+WantedBy=multi-user.target

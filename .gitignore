@@ -1,0 +1,34 @@
+# Local machine inventory (IPs, logins, host paths). Never commit.
+*.local.md
+deploy/systemd/assistant-backup-sync.service
+deploy/systemd/assistant-backup-sync.timer
+deploy/systemd/assistant-backup-sync-pull.service
+deploy/systemd/assistant-backup-sync-pull.timer
+
+# Secrets. The tokens in these files are the whole security boundary between Telegram, the Gateway
+# and the Core host; none of them belong in git.
+.env
+*.env
+!.env.example
+assistant.toml
+cookies.txt
+
+# Local state
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data/
+models/
+
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+.DS_Store

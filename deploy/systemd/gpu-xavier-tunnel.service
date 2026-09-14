@@ -1,0 +1,33 @@
+[Unit]
+# Reverse tunnel from a GPU host to the Core host when the Core cannot open
+# inbound TCP to the GPU host. Core then reaches STT/OCR on its loopback.
+# Install on the GPU host: ~/.config/systemd/user/ and enable with
+#   systemctl --user enable --now gpu-xavier-tunnel
+Description=Reverse SSH tunnel: Core loopback -> GPU STT/OCR
+Documentation=https://github.com/yourname/personal-assistant/blob/main/docs/operations.md
+After=network-online.target gpu-transcriber.service handwriting-ocr.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N \
+    -F none \
+    -i %h/.ssh/id_ed25519_core \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=yes \
+    -R 17493:127.0.0.1:17493 \
+    -R 17494:127.0.0.1:17494 \
+    core@core.example
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpu-xavier-tunnel
+
+[Install]
+WantedBy=default.target

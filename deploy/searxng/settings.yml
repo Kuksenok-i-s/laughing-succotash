@@ -1,0 +1,66 @@
+# SearXNG configuration for the assistant.
+#
+# This is not a public instance and has no human users: web-search is the only client, it calls
+# /search?format=json over loopback, and nobody ever opens the HTML page. That shapes every choice
+# below — the JSON format is enabled, the rate limiter is off because it would throttle our own
+# batch, and the cosmetic settings are left at their defaults because nothing renders them.
+
+use_default_settings: true
+
+general:
+  instance_name: "assistant-search"
+  # No UI to put links in.
+  donation_url: false
+  contact_url: false
+  enable_metrics: false
+
+server:
+  # Overridden by SEARXNG_SECRET from the environment; never commit a real one.
+  secret_key: "set-via-SEARXNG_SECRET"
+  # The limiter exists to stop strangers scraping a public instance. Here it would only rate-limit
+  # web-search's own batch, and the port is not reachable from outside this host.
+  limiter: false
+  public_instance: false
+  # Our backend calls /search with query parameters.
+  method: "GET"
+  # Proxying images would mean fetching remote media through this container. We only read text.
+  image_proxy: false
+
+search:
+  # The assistant's own guidance decides what is worth searching; filtering here would silently
+  # drop results the factcheck pass may legitimately need.
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "ru"
+  # Without json in this list, /search?format=json answers 403 and every query fails.
+  formats:
+    - json
+
+outgoing:
+  # Kept under web-search's own SEARCH_REQUEST_TIMEOUT (10s) so a slow engine surfaces as a
+  # partial result set rather than as a timeout on our side.
+  request_timeout: 6.0
+  max_request_timeout: 8.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+engines:
+  # Engines that need an account, ask for money, or answer with something other than web results
+  # are off. What is left is the general-purpose set, which is what a factcheck query wants.
+  - name: wikidata
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: startpage
+    disabled: false
+  # Aggregating Google through SearXNG gets the instance blocked quickly and returns captchas
+  # instead of results. The engines above do not have that problem.
+  - name: google
+    disabled: true

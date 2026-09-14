@@ -1,0 +1,51 @@
+[Unit]
+# System unit for the web search service. It runs beside the Core and binds loopback, so no
+# credential it holds leaves this machine.
+#
+# The venv holds nothing: this unit has no third-party dependencies. It exists because the Core
+# host is a Jetson whose system interpreters are 3.8 and 3.9, while this code needs 3.12+. The
+# venv is built from the same uv-managed 3.13 the Core itself runs on, and gives the unit a stable
+# path that a uv upgrade cannot move out from under it.
+Description=Web search service (Brave / SearXNG behind one batching API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=core
+Group=core
+WorkingDirectory=/home/core/tg_bot_kirpich
+EnvironmentFile=/home/core/.config/web-search/service.env
+Environment=PYTHONPATH=/home/core/tg_bot_kirpich/web-search
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/core/.local/bin:/usr/bin:/bin
+Environment=TMPDIR=/home/core/.web-search/tmp
+Environment=TEMP=/home/core/.web-search/tmp
+Environment=TMP=/home/core/.web-search/tmp
+ExecStart=/home/core/.assistant/venv-web-search/bin/python -m web_search.main
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Nothing is ever spooled: the cache is in memory and fetched pages are never written down. The
+# one writable path is TMPDIR, and it exists only so that nothing falls back to a shared /tmp.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/core/.web-search
+
+# A bounded cache of short excerpts plus one page at a time. 256M is generous.
+MemoryAccounting=yes
+MemoryMax=256M
+MemorySwapMax=0
+OOMPolicy=kill
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=web-search
+
+[Install]
+WantedBy=multi-user.target

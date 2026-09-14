@@ -1,0 +1,44 @@
+[Unit]
+# System unit for faster-whisper on Jetson Xavier. CTranslate2 is a CUDA 11.4 build
+# (sm_72, no flash-attn) installed to ~/.local/opt/ctranslate2. System (not user)
+# so MemoryMax is enforced on cgroup v1.
+Description=Transcription service (faster-whisper large-v3, CUDA float16)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=core
+Group=core
+WorkingDirectory=/home/core/tg_bot_kirpich
+EnvironmentFile=/home/core/.config/gpu-transcriber/service.env
+Environment=PYTHONPATH=/home/core/tg_bot_kirpich/gpu-transcriber
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/core/.local/bin:/home/core/.assistant/venv-whisper/bin:/usr/bin:/bin
+Environment=LD_LIBRARY_PATH=/home/core/.local/opt/ctranslate2/lib:/usr/local/cuda/lib64
+Environment=TMPDIR=/home/core/.gpu-transcriber/tmp
+Environment=TEMP=/home/core/.gpu-transcriber/tmp
+Environment=TMP=/home/core/.gpu-transcriber/tmp
+ExecStart=/home/core/.assistant/venv-whisper/bin/python -m gpu_transcriber.main
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# large-v3 float16 is ~3GB weights; 10-minute chunks keep the working set bounded.
+# 6G leaves headroom for Core (also 6G) on the same 14GB board.
+MemoryAccounting=yes
+MemoryMax=6G
+MemorySwapMax=0
+OOMPolicy=kill
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpu-transcriber
+
+[Install]
+WantedBy=multi-user.target

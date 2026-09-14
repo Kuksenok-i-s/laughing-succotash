@@ -1,0 +1,20 @@
+[Unit]
+Description=Retrieve and restore-verify Assistant backup from the Core host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+EnvironmentFile=-/etc/assistant/infra.env
+ExecStart=/usr/bin/python3 /usr/local/lib/assistant-backup/assistant_backup_pull.py
+Nice=15
+IOSchedulingClass=idle
+MemoryMax=256M
+TimeoutStartSec=2h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/assistant-backups

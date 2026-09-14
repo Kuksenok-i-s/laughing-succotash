@@ -1,0 +1,124 @@
+"""Service configuration.
+
+Environment only, and a plain dataclass rather than pydantic-settings. The HTTP surface is
+standard library; image preprocessing uses Pillow and OpenCV.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+ENV_PREFIX = "OCR_"
+
+# Neighbouring the STT service port (17493) so a netstat listing shows the pair.
+DEFAULT_PORT = 17494
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    # Loopback by default. Override OCR_HOST only if Core and OCR are on different machines.
+    host: str = "127.0.0.1"
+    port: int = DEFAULT_PORT
+    token: str = ""
+
+    # ollama = /api/chat on OCR_OLLAMA_URL; llamacpp = OpenAI /v1 on OCR_LLAMA_URL.
+    backend: str = "ollama"
+    ollama_url: str = "http://127.0.0.1:11434"
+    manage_llama_service: bool = False
+    llama_url: str = "http://127.0.0.1:8081"
+    model: str = "qwen3-vl:2b"
+    keep_alive: str = "1h"
+    request_timeout: float = 600.0
+    max_tokens: int = 2048
+    # Long-edge cap in pixels for every image sent to the VL model.
+    image_max_edge: int = 512
+    # 1 = page only; >=2 = page plus at most one localized uncertainty retry.
+    max_passes: int = 2
+    # triage = Qwen-style kind JSON. ocr = one-shot document prompt (OvisOCR2 / GLM-OCR).
+    pipeline: str = "triage"
+
+    work_dir: Path = Path("~/.handwriting-ocr").expanduser()
+    job_ttl_seconds: float = 6 * 3600.0
+    sweep_interval_seconds: float = 60.0
+    gpu_lock_path: str = ""
+    idle_unload_seconds: float = 3600.0
+    max_upload_mb: int = 32
+    upload_chunk_size: int = 1024 * 1024
+
+    log_level: str = "INFO"
+    log_format: str = "text"
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
+
+    def validate_runtime(self) -> list[str]:
+        problems: list[str] = []
+        if not self.token:
+            problems.append(f"{ENV_PREFIX}TOKEN is not set")
+        elif len(self.token) < 32:
+            problems.append(f"{ENV_PREFIX}TOKEN is shorter than 32 characters")
+        if not self.model.strip():
+            problems.append(f"{ENV_PREFIX}MODEL is empty")
+        if self.backend not in {"ollama", "llamacpp"}:
+            problems.append(f"{ENV_PREFIX}BACKEND must be ollama or llamacpp")
+        if self.pipeline not in {"triage", "ocr"}:
+            problems.append(f"{ENV_PREFIX}PIPELINE must be triage or ocr")
+        if self.manage_llama_service and (self.backend != "llamacpp" or not self.gpu_lock_path):
+            problems.append("managed llama service requires llamacpp and OCR_GPU_LOCK_PATH")
+        return problems
+
+
+def from_env(env: Mapping[str, str] | None = None) -> Settings:
+    source = os.environ if env is None else env
+    defaults = Settings()
+
+    def text(name: str, fallback: str) -> str:
+        raw = source.get(ENV_PREFIX + name)
+        if raw is None or not raw.strip():
+            return fallback
+        return raw
+
+    def number(name: str, fallback: int) -> int:
+        raw = source.get(ENV_PREFIX + name)
+        return fallback if raw is None or not raw.strip() else int(raw)
+
+    def seconds(name: str, fallback: float) -> float:
+        raw = source.get(ENV_PREFIX + name)
+        return fallback if raw is None or not raw.strip() else float(raw)
+
+    work_dir = source.get(ENV_PREFIX + "WORK_DIR")
+    return Settings(
+        host=text("HOST", defaults.host),
+        port=number("PORT", defaults.port),
+        token=text("TOKEN", defaults.token),
+        backend=text("BACKEND", defaults.backend).strip().lower(),
+        ollama_url=text("OLLAMA_URL", defaults.ollama_url).rstrip("/"),
+        manage_llama_service=text("MANAGE_LLAMA_SERVICE", "false").lower() in {"true", "1", "yes"},
+        llama_url=text("LLAMA_URL", defaults.llama_url).rstrip("/"),
+        model=text("MODEL", defaults.model),
+        keep_alive=text("OLLAMA_KEEP_ALIVE", defaults.keep_alive),
+        request_timeout=seconds("REQUEST_TIMEOUT", defaults.request_timeout),
+        max_tokens=number("MAX_TOKENS", defaults.max_tokens),
+        image_max_edge=number("IMAGE_MAX_EDGE", defaults.image_max_edge),
+        max_passes=number("MAX_PASSES", defaults.max_passes),
+        pipeline=text("PIPELINE", defaults.pipeline).strip().lower(),
+        work_dir=(
+            Path(work_dir).expanduser().resolve() if work_dir else defaults.work_dir
+        ),
+        job_ttl_seconds=seconds("JOB_TTL_SECONDS", defaults.job_ttl_seconds),
+        sweep_interval_seconds=seconds(
+            "SWEEP_INTERVAL_SECONDS", defaults.sweep_interval_seconds
+        ),
+        gpu_lock_path=text("GPU_LOCK_PATH", defaults.gpu_lock_path),
+        idle_unload_seconds=seconds(
+            "IDLE_UNLOAD_SECONDS", defaults.idle_unload_seconds
+        ),
+        max_upload_mb=number("MAX_UPLOAD_MB", defaults.max_upload_mb),
+        upload_chunk_size=number("UPLOAD_CHUNK_SIZE", defaults.upload_chunk_size),
+        log_level=text("LOG_LEVEL", defaults.log_level),
+        log_format=text("LOG_FORMAT", defaults.log_format),
+    )

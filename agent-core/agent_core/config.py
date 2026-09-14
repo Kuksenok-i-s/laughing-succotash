@@ -1,0 +1,348 @@
+"""Agent Core configuration.
+
+Secrets come from the environment or a local ``.env``; nothing sensitive is committed, and the
+filesystem/project allowlists are the security boundary for everything Cursor can reach.
+"""
+
+from __future__ import annotations
+
+import tomllib
+from datetime import tzinfo
+from functools import cached_property
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import BaseModel, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ProjectConfig(BaseModel):
+    """One coding project Cursor is permitted to open.
+
+    Prefer leaving ``[projects]`` empty: the Telegram agent is confined to
+    ``DATA_DIR/user_{tg_id}`` and must not open the assistant's own source tree.
+    """
+
+    path: Path
+    writable: bool = False
+    description: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _absolute(cls, value: Path) -> Path:
+        return value.expanduser().resolve()
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+        extra="ignore",
+    )
+
+    instance_id: str = "home-macmini"
+
+    # --- Gateway connection ---
+    gateway_url: str = "wss://gateway.example.com/rpc"
+    core_token: str = ""
+    reconnect_base_delay: float = 1.0
+    reconnect_max_delay: float = 60.0
+    reconnect_healthy_after: float = 60.0
+    ping_interval: float = 20.0
+    ping_timeout: float = 20.0
+    rpc_call_timeout: float = 30.0
+    # TLS verification is on by default and should only ever be disabled against a local test
+    # gateway with a self-signed certificate.
+    verify_tls: bool = True
+
+    # --- Authorization ---
+    allowed_users: list[str] = Field(default_factory=list)
+
+    @field_validator("allowed_users", mode="before")
+    @classmethod
+    def _split_users(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return [u.strip() for u in value.split(",") if u.strip()]
+        return value
+
+    @field_validator("stt_backend")
+    @classmethod
+    def _stt_backend(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"local", "gpu"}:
+            raise ValueError("STT_BACKEND must be 'local' or 'gpu'")
+        return normalized
+
+    # --- Storage ---
+    data_dir: Path = Path("~/.personal-assistant")
+    database_path: Path | None = None
+    temp_dir: Path | None = None
+
+    # --- Agent ---
+    agent_backend: str = "acp"  # "acp" (Cursor) | "codex-acp"
+    codex_acp_binary: str = "codex-acp"
+    codex_model: str | None = None
+    cursor_agent_binary: str = "cursor-agent"
+    cursor_model: str | None = None
+    agent_startup_timeout: float = 60.0
+    agent_prompt_timeout: float = 1800.0
+    # Fallback cwd for the ACP subprocess itself (before any session). Per-user chat sessions
+    # use ``user_workspace`` under DATA_DIR; this must not be a sensitive tree.
+    assistant_workspace: Path | None = None
+
+    # --- MCP ---
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8931
+    mcp_token: str = ""
+
+    # --- Yandex Calendar (CalDAV) ---
+    # Only this Telegram user is routed to Yandex. Everyone else keeps the local calendar.
+    yandex_calendar_user_id: str | None = None
+    yandex_calendar_username: str = ""
+    yandex_calendar_app_password: str = ""
+    yandex_calendar_name: str | None = None
+    yandex_calendar_url: str = "https://caldav.yandex.ru/"
+
+    @field_validator("yandex_calendar_user_id", mode="before")
+    @classmethod
+    def _namespace_yandex_user(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return None
+        text = str(value).strip()
+        return text if ":" in text else f"tg:{text}"
+
+    # --- STT ---
+    # local = faster-whisper on this machine; gpu = the transcription service on the CUDA host.
+    stt_backend: str = "local"
+    stt_gpu_url: str = "http://127.0.0.1:17493"
+    stt_gpu_token: str = ""
+    # Second GPU (OCR host). Used for parallel 10-minute chunks when OCR is idle.
+    stt_gpu_secondary_url: str = ""
+    stt_gpu_secondary_token: str = ""
+    stt_gpu_poll_interval: float = 2.0
+    stt_gpu_request_timeout: float = 30.0
+    stt_gpu_upload_timeout: float = 900.0
+    # When STT_BACKEND=gpu, try local CPU whisper if the GPU host is unreachable. Off = fail.
+    stt_cpu_fallback: bool = True
+    stt_model: str = "large-v3"
+    stt_device: str = "cpu"
+    stt_compute_type: str = "auto"
+    stt_language: str = "auto"
+    stt_max_concurrent: int = 1
+    stt_beam_size: int = 5
+    stt_vad_filter: bool = True
+    stt_chunk_seconds: float = 600.0
+    stt_chunk_overlap_seconds: float = 2.0
+    max_audio_size_mb: int = 500
+    max_audio_duration_seconds: int = 36000
+    # Warn and keep going in the background once a recording is this long. 0 disables.
+    long_audio_warn_seconds: int = 3600
+    upload_idle_timeout: float = 300.0
+
+    # --- Handwriting OCR (remote only; no local model) ---
+    ocr_enabled: bool = False
+    ocr_service_url: str = "http://127.0.0.1:17494"
+    ocr_service_token: str = ""
+    ocr_poll_interval: float = 2.0
+    ocr_request_timeout: float = 30.0
+    ocr_upload_timeout: float = 300.0
+    ocr_stall_timeout: float = 900.0
+    max_image_size_mb: int = 32
+
+    # --- Web search (remote only; the service holds the provider credentials) ---
+    # Off by default: with no service configured, web_search and web_fetch are never registered
+    # and the assistant has no network reach through MCP at all.
+    search_enabled: bool = False
+    search_service_url: str = "http://127.0.0.1:17495"
+    search_service_token: str = ""
+    search_default_limit: int = 5
+    search_lang: str = "ru"
+    search_request_timeout: float = 20.0
+    search_fetch_timeout: float = 40.0
+
+    # --- YouTube ---
+    # yt-dlp runs on the proxy VPS over SSH, one file at a time; the toml holds that host and its key.
+    youtube_config: Path | None = None
+
+    # --- Behaviour ---
+    default_timezone: str = "Europe/Moscow"
+    confirmation_timeout_seconds: int = 900
+    scheduler_tick_seconds: float = 5.0
+    # A transcript longer than this is treated as a recording to analyse rather than a spoken
+    # command, which changes both the prompt and the permission provenance.
+    long_transcript_chars: int = 1200
+    transcript_chunk_chars: int = 12000
+    # Scratch agent sessions analysing transcript chunks side by side. Each chunk is an
+    # independent prompt, so an hour of speech takes one chunk's time instead of the sum.
+    transcript_parallel: int = Field(default=3, ge=1)
+    # Evening diary check-in and the morning of the 1st when last month is summarised.
+    journal_hour: int = Field(default=21, ge=0, le=23)
+    journal_minute: int = Field(default=0, ge=0, le=59)
+    journal_summary_hour: int = Field(default=10, ge=0, le=23)
+    journal_enabled: bool = True
+
+    # --- Allowlists (from assistant.toml) ---
+    config_file: Path | None = None
+
+    # --- Logging ---
+    log_level: str = "INFO"
+    log_format: str = "text"  # "text" | "json"
+
+    @field_validator("data_dir")
+    @classmethod
+    def _expand(cls, value: Path) -> Path:
+        return value.expanduser()
+
+    @cached_property
+    def resolved_data_dir(self) -> Path:
+        path = self.data_dir.expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @cached_property
+    def resolved_database_path(self) -> Path:
+        if self.database_path is not None:
+            return self.database_path.expanduser().resolve()
+        return self.resolved_data_dir / "core.sqlite3"
+
+    @cached_property
+    def resolved_temp_dir(self) -> Path:
+        path = (
+            self.temp_dir.expanduser().resolve()
+            if self.temp_dir is not None
+            else self.resolved_data_dir / "tmp"
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @cached_property
+    def resolved_assistant_workspace(self) -> Path:
+        path = (
+            self.assistant_workspace.expanduser().resolve()
+            if self.assistant_workspace is not None
+            else self.resolved_data_dir / "workspace"
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def user_workspace(self, user_id: str) -> Path:
+        """Per-Telegram-user directory the Cursor agent may read and write.
+
+        Layout: ``DATA_DIR/user_{tg_id}``. Created on first use. Everything else on the
+        filesystem is out of bounds for ACP ``fs/*`` tools (see ``agent.fs_sandbox``).
+        """
+        from .agent.fs_sandbox import telegram_dir_id
+
+        path = self.resolved_data_dir / f"user_{telegram_dir_id(user_id)}"
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
+
+    @cached_property
+    def timezone(self) -> tzinfo:
+        try:
+            return ZoneInfo(self.default_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(
+                f"unknown DEFAULT_TIMEZONE {self.default_timezone!r}; "
+                "timezone must be explicit for reminders to be correct"
+            ) from exc
+
+    @cached_property
+    def _allowlists(self) -> dict[str, Any]:
+        candidate = (
+            self.config_file.expanduser().resolve()
+            if self.config_file is not None
+            else self.resolved_data_dir / "assistant.toml"
+        )
+        if not candidate.exists():
+            return {}
+        with candidate.open("rb") as handle:
+            return tomllib.load(handle)
+
+    @cached_property
+    def allowed_files(self) -> list[Path]:
+        """Directories the assistant may read. ``$HOME`` is never included wholesale."""
+        raw = self._allowlists.get("files") or []
+        return [Path(p).expanduser().resolve() for p in raw]
+
+    @cached_property
+    def projects(self) -> dict[str, ProjectConfig]:
+        raw = self._allowlists.get("projects") or {}
+        return {name: ProjectConfig(**cfg) for name, cfg in raw.items()}
+
+    @cached_property
+    def resolved_youtube_config(self) -> Path:
+        """Where the YouTube worker's SSH settings live. Unrelated to the GPU service."""
+        if self.youtube_config is not None:
+            return self.youtube_config.expanduser().resolve()
+        return self.resolved_data_dir / "youtube" / "config.toml"
+
+    @cached_property
+    def max_audio_bytes(self) -> int:
+        return self.max_audio_size_mb * 1024 * 1024
+
+    @cached_property
+    def max_image_bytes(self) -> int:
+        return self.max_image_size_mb * 1024 * 1024
+
+    def validate_runtime(self) -> list[str]:
+        """Return fatal misconfigurations. Checked at startup so failures are loud and early."""
+        problems: list[str] = []
+        if not self.core_token:
+            problems.append("CORE_TOKEN is not set")
+        elif len(self.core_token) < 32:
+            problems.append("CORE_TOKEN is shorter than 32 characters")
+        if not self.mcp_token:
+            problems.append("MCP_TOKEN is not set")
+        if self.stt_backend == "gpu" and not self.stt_gpu_token:
+            problems.append("STT_GPU_TOKEN is not set but STT_BACKEND=gpu")
+        if self.ocr_enabled and not self.ocr_service_token:
+            problems.append("OCR_SERVICE_TOKEN is not set but OCR is enabled")
+        if self.search_enabled and not self.search_service_token:
+            problems.append("SEARCH_SERVICE_TOKEN is not set but search is enabled")
+        if not self.allowed_users:
+            problems.append("ALLOWED_USERS is empty; the Core would accept nobody")
+        for user in self.allowed_users:
+            if ":" not in user:
+                problems.append(f"ALLOWED_USERS entry {user!r} must be namespaced, e.g. 'tg:123'")
+        yandex_values = (
+            self.yandex_calendar_user_id,
+            self.yandex_calendar_username,
+            self.yandex_calendar_app_password,
+        )
+        if any(yandex_values) and not all(yandex_values):
+            problems.append(
+                "YANDEX_CALENDAR_USER_ID, YANDEX_CALENDAR_USERNAME and "
+                "YANDEX_CALENDAR_APP_PASSWORD must be set together"
+            )
+        if (
+            self.yandex_calendar_user_id
+            and self.yandex_calendar_user_id not in self.allowed_users
+        ):
+            problems.append("YANDEX_CALENDAR_USER_ID must also be present in ALLOWED_USERS")
+        try:
+            _ = self.timezone
+        except ValueError as exc:
+            problems.append(str(exc))
+        for name, project in self.projects.items():
+            if not project.path.exists():
+                problems.append(f"project {name!r} path does not exist: {project.path}")
+        return problems
+
+
+_settings: Settings | None = None
+
+
+def get_settings() -> Settings:
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
+
+
+def set_settings(settings: Settings) -> None:
+    """Override the process-wide settings. Used by tests."""
+    global _settings
+    _settings = settings

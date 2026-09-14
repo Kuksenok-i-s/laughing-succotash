@@ -1,0 +1,69 @@
+"""Settings come from the environment and nowhere else."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from gpu_transcriber.config import DEFAULT_PORT, from_env
+
+
+def test_defaults_need_only_a_token() -> None:
+    settings = from_env({"GPU_STT_TOKEN": "t" * 40})
+
+    assert settings.port == DEFAULT_PORT
+    assert settings.host == "127.0.0.1"
+    assert settings.device == "cuda"
+    assert settings.beam_size == 2
+    assert settings.batch_size == 8
+    assert settings.idle_unload_seconds == 600.0
+    assert settings.validate_runtime() == []
+
+
+def test_a_missing_or_short_token_is_a_configuration_error() -> None:
+    assert from_env({}).validate_runtime() == ["GPU_STT_TOKEN is not set"]
+    assert from_env({"GPU_STT_TOKEN": "short"}).validate_runtime() == [
+        "GPU_STT_TOKEN is shorter than 32 characters"
+    ]
+
+
+def test_the_environment_overrides_every_default(tmp_path: Path) -> None:
+    settings = from_env(
+        {
+            "GPU_STT_TOKEN": "t" * 40,
+            "GPU_STT_HOST": "gpu.example",
+            "GPU_STT_PORT": "18000",
+            "GPU_STT_MODEL": "/models/large-v3",
+            "GPU_STT_COMPUTE_TYPE": "int8",
+            "GPU_STT_BEAM_SIZE": "4",
+            "GPU_STT_BATCH_SIZE": "0",
+            "GPU_STT_VAD_FILTER": "no",
+            "GPU_STT_WORK_DIR": str(tmp_path / "work"),
+            "GPU_STT_MAX_UPLOAD_MB": "64",
+            "GPU_STT_JOB_TTL_SECONDS": "120",
+            "GPU_STT_IDLE_UNLOAD_SECONDS": "90",
+            "GPU_STT_CHUNK_SECONDS": "300",
+            "GPU_STT_CHUNK_OVERLAP_SECONDS": "1.5",
+        }
+    )
+
+    assert settings.host == "gpu.example"
+    assert settings.port == 18000
+    assert settings.model == "/models/large-v3"
+    assert settings.compute_type == "int8"
+    assert settings.beam_size == 4
+    assert settings.batch_size == 0
+    assert settings.vad_filter is False
+    assert settings.work_dir == tmp_path / "work"
+    assert settings.max_upload_bytes == 64 * 1024 * 1024
+    assert settings.job_ttl_seconds == 120.0
+    assert settings.idle_unload_seconds == 90.0
+    assert settings.chunk_seconds == 300.0
+    assert settings.chunk_overlap_seconds == 1.5
+
+
+def test_a_blank_value_falls_back_to_the_default() -> None:
+    """An env file with an empty line for a setting should not mean "port zero"."""
+    settings = from_env({"GPU_STT_TOKEN": "t" * 40, "GPU_STT_PORT": "", "GPU_STT_HOST": ""})
+
+    assert settings.port == DEFAULT_PORT
+    assert settings.host == "127.0.0.1"

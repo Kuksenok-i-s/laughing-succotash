@@ -1,0 +1,21 @@
+[project]
+name = "web-search"
+version = "1.0.0"
+description = "Web search service: Brave or SearXNG behind one batching HTTP API"
+requires-python = ">=3.12"
+# No runtime dependencies on purpose: the HTTP surface and the outbound calls are both standard
+# library, so this unit installs anywhere the Core can reach without a build toolchain.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+web-search = "web_search.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["web_search"]

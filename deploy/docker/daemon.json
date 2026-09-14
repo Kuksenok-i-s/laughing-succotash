@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Docker daemon configuration for the Core host.",
+    "",
+    "Merge into the existing /etc/docker/daemon.json rather than replacing it — the runtimes",
+    "block is what lets GPU containers start, and losing it is not obvious until something",
+    "needs CUDA. Then restart dockerd, which also restarts Pi-hole and briefly takes LAN DNS",
+    "down, so pick the moment.",
+    "",
+    "Set dns to the Core host Pi-hole (see docs/infra.local.md) so that upstream lookups go",
+    "through the filter. Docker's documented behaviour is to fall back to Google's 8.8.8.8 and",
+    "8.8.4.4 when the host's /etc/resolv.conf holds only loopback addresses — which is exactly",
+    "what this host has (127.0.0.53, the systemd-resolved stub). Docker currently reads the real",
+    "upstreams out of /run/systemd/resolve/resolv.conf and lands on that Pi-hole anyway, so this",
+    "is insurance rather than a repair: it stops a resolved reconfiguration from silently moving",
+    "every container's lookups off the filtered path.",
+    "",
+    "Pi-hole's own container sets dns: [1.1.1.1, 9.9.9.9] in its compose file. That per-container",
+    "override wins over this default, so Pi-hole does not end up pointed at itself.",
+    "",
+    "JSON has no comments; dockerd ignores unknown keys, so this one is harmless."
+  ],
+  "runtimes": {
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  },
+  "dns-opts": ["ndots:0"]
+}
